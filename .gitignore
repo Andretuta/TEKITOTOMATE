@@ -1,0 +1,14 @@
+# Arquivos de dependências
+node_modules
+
+# Arquivos de sessão do whatsapp-web.js
+# Contém dados sensíveis de autenticação! NUNCA envie para o GitHub.
+.wwebjs_auth/
+
+# Arquivos de log e banco de dados
+*.log
+groups.json
+
+# Arquivos de sistema operacional
+.DS_Store
+Thumbs.db
