@@ -150,10 +150,28 @@ wpp.on('group_join', notif => {
     }
 });
 
-wpp.on('group_leave', notif => {
-    const updated = readJson(WHATSAPP_GROUPS_DB).filter(id => id !== notif.chatId);
-    writeJson(WHATSAPP_GROUPS_DB, updated);
-    log('🔴 Saiu do grupo WhatsApp:', notif.chatId);
+wpp.on('group_leave', async notif => {
+    try {
+        // Verificar se foi o bot que saiu (comparando IDs)
+        const botId = wpp.info?.wid?._serialized || wpp.info?.wid?.user + '@c.us';
+        const participantIds = notif.recipientIds || [];
+
+        // Verificar se o bot está na lista de quem saiu
+        const botLeft = participantIds.some(id =>
+            id === botId ||
+            id.includes(wpp.info?.wid?.user)
+        );
+
+        if (botLeft) {
+            const updated = readJson(WHATSAPP_GROUPS_DB).filter(id => id !== notif.chatId);
+            writeJson(WHATSAPP_GROUPS_DB, updated);
+            log('🔴 Bot removido do grupo WhatsApp:', notif.chatId);
+        } else {
+            log('👋 Alguém saiu do grupo (não foi o bot):', notif.chatId, 'Participantes:', participantIds);
+        }
+    } catch (error) {
+        log('⚠️ Erro ao processar saída de grupo:', error.message);
+    }
 });
 
 // === CONFIGURAÇÃO DO TELEGRAM ===
