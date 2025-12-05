@@ -96,10 +96,6 @@ const wpp = new Client({
             '--disable-features=VizDisplayCompositor'
         ],
         executablePath: undefined,
-    },
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1014570017.html',
     }
 });
 
@@ -172,7 +168,7 @@ if (TELEGRAM_TOKEN) {
         telegramBot.on('my_chat_member', (data) => {
             const chat = data.chat;
             const chats = readJson(TELEGRAM_CHATS_DB);
-            
+
             if (['member', 'administrator'].includes(data.new_chat_member?.status)) {
                 if (!chats.includes(chat.id)) {
                     chats.push(chat.id);
@@ -180,7 +176,7 @@ if (TELEGRAM_TOKEN) {
                     log('🟢 Adicionado ao grupo/canal Telegram:', chat.id, chat.title || 'N/A');
                 }
             }
-            
+
             if (['left', 'kicked'].includes(data.new_chat_member?.status)) {
                 const filtered = chats.filter(id => id !== chat.id);
                 writeJson(TELEGRAM_CHATS_DB, filtered);
@@ -213,18 +209,18 @@ if (TELEGRAM_TOKEN) {
 async function getMediaFromUrl(url) {
     try {
         log('📥 Baixando mídia de:', url);
-        const response = await axios.get(url, { 
+        const response = await axios.get(url, {
             responseType: 'arraybuffer',
             timeout: 30000,
             maxContentLength: 50 * 1024 * 1024, // 50MB max
         });
-        
+
         const mime = response.headers['content-type'];
         const base64 = Buffer.from(response.data, 'binary').toString('base64');
-        
+
         log('✅ Mídia baixada:', { mime, size: `${(base64.length * 0.75 / 1024 / 1024).toFixed(2)}MB` });
         return new MessageMedia(mime, base64, 'media');
-        
+
     } catch (error) {
         log('❌ Erro ao baixar mídia:', error.message);
         return null;
@@ -236,7 +232,7 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
     const wppGroups = readJson(WHATSAPP_GROUPS_DB);
     const tgChats = readJson(TELEGRAM_CHATS_DB);
     let media = directMedia;
-    
+
     // Verificar se WhatsApp está pronto
     if (!wpp.info) {
         log('⚠️ WhatsApp não está conectado - Pulando envios do WhatsApp');
@@ -247,10 +243,10 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         media = await getMediaFromUrl(imageUrl);
     }
 
-    log('📤 Iniciando envio:', { 
-        hasMedia: !!media, 
-        hasUrl: !!imageUrl, 
-        wppGroups: wppGroups.length, 
+    log('📤 Iniciando envio:', {
+        hasMedia: !!media,
+        hasUrl: !!imageUrl,
+        wppGroups: wppGroups.length,
         tgChats: tgChats.length,
         whatsappReady: !!wpp.info
     });
@@ -270,18 +266,18 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
                 } else {
                     await wpp.sendMessage(id, message || '📣 Nova mensagem!');
                 }
-                
+
                 sucessosWpp++;
-                log(`✅ WhatsApp [${i+1}/${wppGroups.length}]:`, id);
-                
+                log(`✅ WhatsApp [${i + 1}/${wppGroups.length}]:`, id);
+
                 // Delay entre envios para evitar spam
                 if (i < wppGroups.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, 1500));
                 }
-                
+
             } catch (error) {
                 falhasWpp++;
-                log(`❌ Falha WhatsApp [${i+1}/${wppGroups.length}]:`, id, error.message);
+                log(`❌ Falha WhatsApp [${i + 1}/${wppGroups.length}]:`, id, error.message);
             }
         }
     }
@@ -299,25 +295,25 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
                 } else {
                     await telegramBot.sendMessage(id, message || '📣 Nova mensagem!');
                 }
-                
+
                 sucessosTg++;
-                log(`✅ Telegram [${i+1}/${tgChats.length}]:`, id);
-                
+                log(`✅ Telegram [${i + 1}/${tgChats.length}]:`, id);
+
                 // Delay entre envios
                 if (i < tgChats.length - 1) {
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
-                
+
             } catch (error) {
                 falhasTg++;
-                log(`❌ Falha Telegram [${i+1}/${tgChats.length}]:`, id, error.message);
+                log(`❌ Falha Telegram [${i + 1}/${tgChats.length}]:`, id, error.message);
             }
         }
     }
 
     const resumo = `📊 Envio concluído: WPP(${sucessosWpp}✅/${falhasWpp}❌) TG(${sucessosTg}✅/${falhasTg}❌)`;
     log(resumo);
-    
+
     return {
         whatsapp: { sucessos: sucessosWpp, falhas: falhasWpp },
         telegram: { sucessos: sucessosTg, falhas: falhasTg },
@@ -329,17 +325,17 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
 wpp.on('message', async (msg) => {
     // Apenas mensagens privadas de admins
     if (!msg.from.endsWith('@c.us')) return;
-    
+
     const senderNumber = msg.from.replace('@c.us', '');
     const admins = getAdmins();
-    
+
     if (!admins.includes(senderNumber)) {
         log('⛔ Comando não autorizado de:', senderNumber);
         return;
     }
 
     const comando = msg.body.trim().toLowerCase();
-    
+
     try {
         // === COMANDO STATUS ===
         if (comando === 'status') {
@@ -347,8 +343,8 @@ wpp.on('message', async (msg) => {
             const tgChats = readJson(TELEGRAM_CHATS_DB);
             const isWppReady = wpp.info ? '✅ Conectado' : '❌ Desconectado';
             const isTgReady = telegramBot ? '✅ Ativo' : '❌ Inativo';
-            
-            const statusMsg = 
+
+            const statusMsg =
                 `📊 *STATUS DO BOT*\n\n` +
                 `🔸 WhatsApp: ${isWppReady}\n` +
                 `🔸 Grupos WPP: ${wppGroups.length}\n` +
@@ -356,7 +352,7 @@ wpp.on('message', async (msg) => {
                 `🔸 Chats TG: ${tgChats.length}\n` +
                 `🔸 Uptime: ${Math.floor(process.uptime() / 60)}min\n` +
                 `🔸 Memória: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`;
-            
+
             await msg.reply(statusMsg);
             return;
         }
@@ -384,7 +380,7 @@ wpp.on('message', async (msg) => {
 
         // === COMANDO HELP ===
         if (comando === 'help' || comando === 'ajuda') {
-            const helpMsg = 
+            const helpMsg =
                 `🤖 *COMANDOS DISPONÍVEIS:*\n\n` +
                 `• *status* - Ver status do bot\n` +
                 `• *test* - Testar funcionamento\n` +
@@ -394,7 +390,7 @@ wpp.on('message', async (msg) => {
                 `• Digite a mensagem normalmente\n` +
                 `• Envie uma imagem com legenda\n` +
                 `• Envie apenas uma URL de imagem`;
-            
+
             await msg.reply(helpMsg);
             return;
         }
@@ -407,7 +403,7 @@ wpp.on('message', async (msg) => {
         // Verificar se há grupos cadastrados
         const wppGroups = readJson(WHATSAPP_GROUPS_DB);
         const tgChats = readJson(TELEGRAM_CHATS_DB);
-        
+
         if (wppGroups.length === 0 && tgChats.length === 0) {
             await msg.reply('❌ Nenhum grupo ou canal registrado ainda.');
             return;
@@ -417,15 +413,15 @@ wpp.on('message', async (msg) => {
         if (msg.hasMedia) {
             log('📥 Processando mídia enviada...');
             await msg.reply('📥 Baixando mídia, aguarde...');
-            
+
             media = await msg.downloadMedia();
             if (media) {
-                log('✅ Mídia processada:', { 
-                    tipo: media.mimetype, 
-                    tamanho: `${(media.data.length * 0.75 / 1024 / 1024).toFixed(2)}MB` 
+                log('✅ Mídia processada:', {
+                    tipo: media.mimetype,
+                    tamanho: `${(media.data.length * 0.75 / 1024 / 1024).toFixed(2)}MB`
                 });
             }
-        } 
+        }
         // Verificar se é URL de mídia
         else if (/https?:\/\/.+\.(jpg|jpeg|png|gif|webp|mp4|mov|avi)/i.test(content)) {
             imageUrl = content.trim();
@@ -436,13 +432,13 @@ wpp.on('message', async (msg) => {
         // Enviar para todos os grupos
         if (content || media || imageUrl) {
             await msg.reply('📤 Enviando para todos os grupos...');
-            
+
             const resultado = await sendToAll(
-                content || '📣 Nova mensagem do admin!', 
-                imageUrl, 
+                content || '📣 Nova mensagem do admin!',
+                imageUrl,
                 media
             );
-            
+
             await msg.reply(`✅ ${resultado.resumo}`);
             log('📤 Envio solicitado por admin:', senderNumber);
         } else {
@@ -470,28 +466,28 @@ app.use((req, res, next) => {
 app.post('/send-to-all', async (req, res) => {
     try {
         const { message, imageUrl } = req.body;
-        
+
         if (!message && !imageUrl) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'Mensagem ou URL de imagem é obrigatória.' 
+            return res.status(400).json({
+                success: false,
+                error: 'Mensagem ou URL de imagem é obrigatória.'
             });
         }
 
         const resultado = await sendToAll(message || '', imageUrl);
-        
-        res.json({ 
-            success: true, 
+
+        res.json({
+            success: true,
             message: 'Enviado com sucesso.',
             resultado: resultado
         });
-        
+
     } catch (error) {
         log('❌ Erro na API:', error.message);
-        res.status(500).json({ 
-            success: false, 
+        res.status(500).json({
+            success: false,
             error: 'Erro interno do servidor.',
-            details: error.message 
+            details: error.message
         });
     }
 });
@@ -500,7 +496,7 @@ app.post('/send-to-all', async (req, res) => {
 app.get('/status', (req, res) => {
     const wppGroups = readJson(WHATSAPP_GROUPS_DB);
     const tgChats = readJson(TELEGRAM_CHATS_DB);
-    
+
     res.json({
         whatsapp: {
             connected: !!wpp.info,
@@ -539,15 +535,15 @@ async function initializeWhatsApp() {
         initAttempts++;
         log(`🚀 Tentativa ${initAttempts}/${maxAttempts} de conectar WhatsApp...`);
         console.log(`🚀 Tentativa ${initAttempts}/${maxAttempts} de conectar WhatsApp...`);
-        
+
         await wpp.initialize();
-        
+
         // Timeout para verificar conexão
         setTimeout(() => {
             if (!wpp.info && initAttempts <= maxAttempts) {
                 log('⏰ Timeout de conexão WhatsApp - Tentando novamente...');
                 console.log('⏰ WhatsApp não conectou em 90 segundos');
-                
+
                 if (initAttempts < maxAttempts) {
                     setTimeout(() => initializeWhatsApp(), 5000);
                 } else {
@@ -556,10 +552,10 @@ async function initializeWhatsApp() {
                 }
             }
         }, 90000);
-        
+
     } catch (error) {
         log('❌ Erro na inicialização do WhatsApp:', error.message);
-        
+
         if (initAttempts < maxAttempts) {
             log('🔄 Tentando novamente em 10 segundos...');
             setTimeout(() => initializeWhatsApp(), 10000);
@@ -573,7 +569,7 @@ async function initializeWhatsApp() {
 process.on('SIGINT', async () => {
     log('🛑 Encerrando bot...');
     console.log('\n🛑 Encerrando bot graciosamente...');
-    
+
     try {
         if (wpp.info) {
             await wpp.destroy();
@@ -584,7 +580,7 @@ process.on('SIGINT', async () => {
     } catch (error) {
         log('❌ Erro ao encerrar:', error.message);
     }
-    
+
     log('👋 Bot encerrado');
     process.exit(0);
 });
