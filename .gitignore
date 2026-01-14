@@ -8,6 +8,7 @@ node_modules
 # Arquivos de log e banco de dados
 *.log
 groups.json
+.env
 
 # Arquivos de sistema operacional
 .DS_Store
