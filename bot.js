@@ -3,21 +3,37 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const axios = require('axios');
-const qrcode = require('qrcode-terminal');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const pino = require('pino');
+const qrcode = require('qrcode');
 const TelegramBot = require('node-telegram-bot-api');
+
+// Baileys - usando @anubis-pro/baileys (fork sem autofollow)
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    Browsers
+} = require('@anubis-pro/baileys');
 
 // === CONFIGURAÇÕES E CAMINHOS ===
 const LOG_FILE = path.join(__dirname, 'logs', 'bot.log');
 const WHATSAPP_GROUPS_DB = path.join(__dirname, 'groups.json');
 const TELEGRAM_CHATS_DB = path.join(__dirname, 'telegram_chats.json');
 const ADMINS_FILE = path.join(__dirname, 'bot_admins.json');
-const SESSION_PATH = './session_data';
+const SESSION_PATH = path.join(__dirname, 'session_baileys');
 
-// Criar diretório de logs se não existir
+// Criar diretórios se não existirem
 if (!fs.existsSync(path.dirname(LOG_FILE))) {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
 }
+if (!fs.existsSync(SESSION_PATH)) {
+    fs.mkdirSync(SESSION_PATH, { recursive: true });
+}
+
+// Logger silencioso para Baileys
+const logger = pino({ level: 'silent' });
 
 // === UTILITÁRIOS ===
 const readJson = (file) => {
@@ -57,125 +73,29 @@ const getAdmins = () => {
     }
 };
 
-// Função para limpar sessão corrompida
-function clearSession() {
-    if (fs.existsSync(SESSION_PATH)) {
-        try {
-            fs.rmSync(SESSION_PATH, { recursive: true, force: true });
-            log('🗑️ Sessão anterior removida com sucesso');
-        } catch (error) {
-            log('❌ Erro ao remover sessão:', error.message);
-        }
+// Função auxiliar de delay
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// === CONFIGURAÇÕES DE ENVIO PARALELO ===
+const PARALLEL_CONFIG = {
+    whatsapp: {
+        batchSize: 4,
+        batchDelay: 2500,
+        maxRetries: 2
+    },
+    telegram: {
+        batchSize: 5,
+        batchDelay: 1500,
+        maxRetries: 2
     }
-}
+};
 
-// Limpar sessão se necessário
-if (process.argv.includes('--clear-session')) {
-    clearSession();
-}
-
-// === CONFIGURAÇÃO DO WHATSAPP ===
-const wpp = new Client({
-    authStrategy: new LocalAuth({
-        dataPath: SESSION_PATH
-    }),
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu',
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor'
-        ],
-        executablePath: undefined,
-    }
-});
-
-// === EVENTOS WHATSAPP COM LOGS DETALHADOS ===
-wpp.on('loading_screen', (percent, message) => {
-    log(`⏳ Carregando WhatsApp: ${percent}% - ${message}`);
-});
-
-wpp.on('qr', qr => {
-    console.log('\n' + '='.repeat(50));
-    console.log('📱 QR CODE GERADO - ESCANEIE COM SEU WHATSAPP');
-    console.log('='.repeat(50));
-    qrcode.generate(qr, { small: true });
-    console.log('='.repeat(50) + '\n');
-    log('🔲 QR Code gerado - Aguardando leitura pelo WhatsApp');
-});
-
-wpp.on('authenticated', () => {
-    log('✅ WhatsApp autenticado com sucesso!');
-});
-
-wpp.on('auth_failure', msg => {
-    log('❌ FALHA DE AUTENTICAÇÃO WhatsApp:', msg);
-    console.log('❌ FALHA DE AUTENTICAÇÃO - Sessão pode estar corrompida');
-    console.log('💡 Tente executar: node bot.js --clear-session');
-});
-
-wpp.on('ready', () => {
-    log('🎉 WhatsApp conectado e pronto para uso!');
-    console.log('🎉 WhatsApp conectado e pronto para uso!');
-    console.log(`📱 Conectado como: ${wpp.info?.pushname || 'N/A'}`);
-    console.log(`📞 Número: ${wpp.info?.wid?.user || 'N/A'}`);
-    console.log(`🤖 Bot operacional às ${new Date().toLocaleTimeString()}`);
-});
-
-wpp.on('disconnected', reason => {
-    log('❌ WhatsApp desconectado:', reason);
-    console.log('❌ WhatsApp desconectado:', reason);
-    console.log('🔄 Tentando reconectar em 10 segundos...');
-    setTimeout(() => {
-        initializeWhatsApp();
-    }, 10000);
-});
-
-// Auto cadastro de grupos
-wpp.on('group_join', notif => {
-    const groups = readJson(WHATSAPP_GROUPS_DB);
-    if (!groups.includes(notif.chatId)) {
-        groups.push(notif.chatId);
-        writeJson(WHATSAPP_GROUPS_DB, groups);
-        log('🟢 Entrou em novo grupo WhatsApp:', notif.chatId);
-    }
-});
-
-wpp.on('group_leave', async notif => {
-    try {
-        // Verificar se foi o bot que saiu (comparando IDs)
-        const botId = wpp.info?.wid?._serialized || wpp.info?.wid?.user + '@c.us';
-        const participantIds = notif.recipientIds || [];
-
-        // Verificar se o bot está na lista de quem saiu
-        const botLeft = participantIds.some(id =>
-            id === botId ||
-            id.includes(wpp.info?.wid?.user)
-        );
-
-        if (botLeft) {
-            const updated = readJson(WHATSAPP_GROUPS_DB).filter(id => id !== notif.chatId);
-            writeJson(WHATSAPP_GROUPS_DB, updated);
-            log('🔴 Bot removido do grupo WhatsApp:', notif.chatId);
-        } else {
-            log('👋 Alguém saiu do grupo (não foi o bot):', notif.chatId, 'Participantes:', participantIds);
-        }
-    } catch (error) {
-        log('⚠️ Erro ao processar saída de grupo:', error.message);
-    }
-});
+// === VARIÁVEIS GLOBAIS ===
+let sock = null;
+let telegramBot = null;
+let isConnected = false;
 
 // === CONFIGURAÇÃO DO TELEGRAM ===
-let telegramBot = null;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 
 if (TELEGRAM_TOKEN) {
@@ -230,37 +150,20 @@ async function getMediaFromUrl(url) {
         const response = await axios.get(url, {
             responseType: 'arraybuffer',
             timeout: 30000,
-            maxContentLength: 50 * 1024 * 1024, // 50MB max
+            maxContentLength: 50 * 1024 * 1024,
         });
 
         const mime = response.headers['content-type'];
-        const base64 = Buffer.from(response.data, 'binary').toString('base64');
+        const buffer = Buffer.from(response.data);
 
-        log('✅ Mídia baixada:', { mime, size: `${(base64.length * 0.75 / 1024 / 1024).toFixed(2)}MB` });
-        return new MessageMedia(mime, base64, 'media');
+        log('✅ Mídia baixada:', { mime, size: `${(buffer.length / 1024 / 1024).toFixed(2)}MB` });
+        return { buffer, mimetype: mime };
 
     } catch (error) {
         log('❌ Erro ao baixar mídia:', error.message);
         return null;
     }
 }
-
-// === CONFIGURAÇÕES DE ENVIO PARALELO ===
-const PARALLEL_CONFIG = {
-    whatsapp: {
-        batchSize: 4,       // Envios simultâneos por lote
-        batchDelay: 2500,   // Delay entre lotes (ms)
-        maxRetries: 2       // Tentativas por grupo
-    },
-    telegram: {
-        batchSize: 5,       // Telegram aguenta mais
-        batchDelay: 1500,   // Delay entre lotes (ms)
-        maxRetries: 2
-    }
-};
-
-// Função auxiliar de delay
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Função de envio em lotes paralelos com retry
 async function sendInBatches(items, sendFunction, config, platform) {
@@ -274,27 +177,24 @@ async function sendInBatches(items, sendFunction, config, platform) {
 
         log(`📦 ${platform} Lote ${batchNum}/${totalBatches} (${batch.length} itens)`);
 
-        // Processar lote em paralelo
         const promises = batch.map(async (itemId) => {
             let lastError = null;
 
-            // Tentar com retry
             for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
                 try {
                     await sendFunction(itemId);
                     results.success++;
                     log(`✅ ${platform} [${results.success + results.failed}/${totalItems}]:`, itemId);
-                    return; // Sucesso, sair do retry
+                    return;
                 } catch (error) {
                     lastError = error;
                     if (attempt < config.maxRetries) {
                         log(`⚠️ ${platform} Retry ${attempt}/${config.maxRetries} para:`, itemId);
-                        await delay(500 * attempt); // Delay progressivo
+                        await delay(500 * attempt);
                     }
                 }
             }
 
-            // Falhou após todas as tentativas
             results.failed++;
             results.errors.push({ id: itemId, error: lastError?.message || 'Erro desconhecido' });
             log(`❌ ${platform} Falha após ${config.maxRetries} tentativas:`, itemId, lastError?.message);
@@ -302,7 +202,6 @@ async function sendInBatches(items, sendFunction, config, platform) {
 
         await Promise.all(promises);
 
-        // Delay entre lotes (exceto o último)
         if (i + config.batchSize < totalItems) {
             await delay(config.batchDelay);
         }
@@ -311,19 +210,67 @@ async function sendInBatches(items, sendFunction, config, platform) {
     return results;
 }
 
-// === FUNÇÃO DE ENVIO MELHORADA COM PARALELO ===
+// === FUNÇÃO PARA SINCRONIZAR GRUPOS EXISTENTES ===
+async function syncGroups() {
+    if (!sock || !isConnected) {
+        throw new Error('WhatsApp não está conectado');
+    }
+
+    log('🔄 Iniciando sincronização de grupos...');
+
+    try {
+        // Buscar todos os grupos onde o bot participa
+        const groups = await sock.groupFetchAllParticipating();
+        const groupIds = Object.keys(groups);
+
+        log(`📊 Encontrados ${groupIds.length} grupos no WhatsApp`);
+
+        // Ler grupos atuais do arquivo
+        const currentGroups = readJson(WHATSAPP_GROUPS_DB);
+        const currentSet = new Set(currentGroups);
+
+        let added = 0;
+
+        // Adicionar grupos que não estão no arquivo
+        for (const groupId of groupIds) {
+            if (!currentSet.has(groupId)) {
+                currentGroups.push(groupId);
+                added++;
+                log(`➕ Grupo adicionado: ${groupId} (${groups[groupId].subject || 'Sem nome'})`);
+            }
+        }
+
+        // Salvar arquivo atualizado
+        if (added > 0) {
+            writeJson(WHATSAPP_GROUPS_DB, currentGroups);
+        }
+
+        const result = {
+            found: groupIds.length,
+            added: added,
+            total: currentGroups.length
+        };
+
+        log(`✅ Sincronização concluída: ${result.found} encontrados, ${result.added} novos, ${result.total} total`);
+
+        return result;
+    } catch (error) {
+        log('❌ Erro na sincronização de grupos:', error.message);
+        throw error;
+    }
+}
+
+// === FUNÇÃO DE ENVIO PRINCIPAL ===
 async function sendToAll(message, imageUrl = null, directMedia = null) {
     const wppGroups = readJson(WHATSAPP_GROUPS_DB);
     const tgChats = readJson(TELEGRAM_CHATS_DB);
     let media = directMedia;
     const startTime = Date.now();
 
-    // Verificar se WhatsApp está pronto
-    if (!wpp.info) {
+    if (!isConnected) {
         log('⚠️ WhatsApp não está conectado - Pulando envios do WhatsApp');
     }
 
-    // Baixar mídia se necessário
     if (!media && imageUrl) {
         media = await getMediaFromUrl(imageUrl);
     }
@@ -333,24 +280,32 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         hasUrl: !!imageUrl,
         wppGroups: wppGroups.length,
         tgChats: tgChats.length,
-        whatsappReady: !!wpp.info,
-        config: PARALLEL_CONFIG
+        whatsappReady: isConnected
     });
 
     let wppResults = { success: 0, failed: 0, errors: [] };
     let tgResults = { success: 0, failed: 0, errors: [] };
 
     // Envios WhatsApp em paralelo
-    if (wpp.info && wppGroups.length > 0) {
+    if (isConnected && sock && wppGroups.length > 0) {
         log(`📱 Iniciando envio WhatsApp para ${wppGroups.length} grupos...`);
 
         wppResults = await sendInBatches(
             wppGroups,
             async (groupId) => {
-                if (media) {
-                    await wpp.sendMessage(groupId, media, { caption: message || '' });
+                if (media && media.buffer) {
+                    const isVideo = media.mimetype?.includes('video');
+                    const isDocument = !media.mimetype?.includes('image') && !isVideo;
+
+                    if (isVideo) {
+                        await sock.sendMessage(groupId, { video: media.buffer, caption: message || '' });
+                    } else if (isDocument) {
+                        await sock.sendMessage(groupId, { document: media.buffer, caption: message || '', mimetype: media.mimetype });
+                    } else {
+                        await sock.sendMessage(groupId, { image: media.buffer, caption: message || '' });
+                    }
                 } else {
-                    await wpp.sendMessage(groupId, message || '📣 Nova mensagem!');
+                    await sock.sendMessage(groupId, { text: message || '📣 Nova mensagem!' });
                 }
             },
             PARALLEL_CONFIG.whatsapp,
@@ -367,9 +322,8 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
             async (chatId) => {
                 if (media && imageUrl) {
                     await telegramBot.sendPhoto(chatId, imageUrl, { caption: message || '' });
-                } else if (media && media.data) {
-                    const buffer = Buffer.from(media.data, 'base64');
-                    await telegramBot.sendPhoto(chatId, buffer, { caption: message || '' });
+                } else if (media && media.buffer) {
+                    await telegramBot.sendPhoto(chatId, media.buffer, { caption: message || '' });
                 } else {
                     await telegramBot.sendMessage(chatId, message || '📣 Nova mensagem!');
                 }
@@ -391,148 +345,344 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
     };
 }
 
-// === COMANDOS WHATSAPP MELHORADOS ===
-wpp.on('message', async (msg) => {
+// === FUNÇÃO PARA PROCESSAR COMANDOS ===
+async function processCommand(msg, senderNumber) {
+    const messageText = msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption || '';
+
+    const comando = messageText.trim().toLowerCase();
+    const chatId = msg.key.remoteJid;
+
     try {
-        // Verificação de segurança para evitar erros com mensagens mal-formadas
-        if (!msg || !msg.from || typeof msg.from !== 'string') {
-            log('⚠️ Mensagem mal-formada recebida, ignorando...');
-            return;
-        }
-
-        // Apenas mensagens privadas de admins
-        if (!msg.from.endsWith('@c.us')) return;
-
-        const senderNumber = msg.from.replace('@c.us', '');
-        const admins = getAdmins();
-
-        if (!admins.includes(senderNumber)) {
-            log('⛔ Comando não autorizado de:', senderNumber);
-            return;
-        }
-
-        const comando = msg.body.trim().toLowerCase();
-
-        try {
-            // === COMANDO STATUS ===
-            if (comando === 'status') {
-                const wppGroups = readJson(WHATSAPP_GROUPS_DB);
-                const tgChats = readJson(TELEGRAM_CHATS_DB);
-                const isWppReady = wpp.info ? '✅ Conectado' : '❌ Desconectado';
-                const isTgReady = telegramBot ? '✅ Ativo' : '❌ Inativo';
-
-                const statusMsg =
-                    `📊 *STATUS DO BOT*\n\n` +
-                    `🔸 WhatsApp: ${isWppReady}\n` +
-                    `🔸 Grupos WPP: ${wppGroups.length}\n` +
-                    `🔸 Telegram: ${isTgReady}\n` +
-                    `🔸 Chats TG: ${tgChats.length}\n` +
-                    `🔸 Uptime: ${Math.floor(process.uptime() / 60)}min\n` +
-                    `🔸 Memória: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`;
-
-                await msg.reply(statusMsg);
-                return;
-            }
-
-            // === COMANDO TESTE ===
-            if (comando === 'test' || comando === 'teste') {
-                const inicio = Date.now();
-                await msg.reply('🤖 Bot funcionando perfeitamente!\n⏱️ Teste de resposta realizado.');
-                const tempo = Date.now() - inicio;
-                log(`✅ Teste realizado em ${tempo}ms para`, senderNumber);
-                return;
-            }
-
-            // === COMANDO RESET ===
-            if (comando === 'reset') {
-                try {
-                    await msg.reply('🔄 Resetando sessão do WhatsApp...');
-                    await wpp.logout();
-                    log('🔄 Sessão resetada por', senderNumber);
-                } catch (error) {
-                    await msg.reply('❌ Erro ao resetar sessão: ' + error.message);
-                }
-                return;
-            }
-
-            // === COMANDO HELP ===
-            if (comando === 'help' || comando === 'ajuda') {
-                const helpMsg =
-                    `🤖 *COMANDOS DISPONÍVEIS:*\n\n` +
-                    `• *status* - Ver status do bot\n` +
-                    `• *test* - Testar funcionamento\n` +
-                    `• *reset* - Resetar sessão\n` +
-                    `• *help* - Esta ajuda\n\n` +
-                    `📝 *Para enviar mensagens:*\n` +
-                    `• Digite a mensagem normalmente\n` +
-                    `• Envie uma imagem com legenda\n` +
-                    `• Envie apenas uma URL de imagem`;
-
-                await msg.reply(helpMsg);
-                return;
-            }
-
-            // === PROCESSAMENTO DE MENSAGENS E MÍDIAS ===
-            let content = msg.body;
-            let media = null;
-            let imageUrl = null;
-
-            // Verificar se há grupos cadastrados
+        // === COMANDO STATUS ===
+        if (comando === 'status') {
             const wppGroups = readJson(WHATSAPP_GROUPS_DB);
             const tgChats = readJson(TELEGRAM_CHATS_DB);
+            const isWppReady = isConnected ? '✅ Conectado' : '❌ Desconectado';
+            const isTgReady = telegramBot ? '✅ Ativo' : '❌ Inativo';
 
-            if (wppGroups.length === 0 && tgChats.length === 0) {
-                await msg.reply('❌ Nenhum grupo ou canal registrado ainda.');
-                return;
+            const statusMsg =
+                `📊 *STATUS DO BOT*\n\n` +
+                `🔸 WhatsApp: ${isWppReady}\n` +
+                `🔸 Grupos WPP: ${wppGroups.length}\n` +
+                `🔸 Telegram: ${isTgReady}\n` +
+                `🔸 Chats TG: ${tgChats.length}\n` +
+                `🔸 Uptime: ${Math.floor(process.uptime() / 60)}min\n` +
+                `🔸 Memória: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
+                `🔸 Biblioteca: Baileys`;
+
+            await sock.sendMessage(chatId, { text: statusMsg });
+            return true;
+        }
+
+        // === COMANDO TESTE ===
+        if (comando === 'test' || comando === 'teste') {
+            const inicio = Date.now();
+            await sock.sendMessage(chatId, { text: '🤖 Bot funcionando perfeitamente!\n⏱️ Teste de resposta realizado.' });
+            const tempo = Date.now() - inicio;
+            log(`✅ Teste realizado em ${tempo}ms para`, senderNumber);
+            return true;
+        }
+
+        // === COMANDO RESET ===
+        if (comando === 'reset') {
+            await sock.sendMessage(chatId, { text: '🔄 Resetando sessão do WhatsApp...\nO bot será reiniciado.' });
+            log('🔄 Sessão resetada por', senderNumber);
+
+            // Limpar sessão
+            if (fs.existsSync(SESSION_PATH)) {
+                fs.rmSync(SESSION_PATH, { recursive: true, force: true });
             }
 
-            // Processar mídia enviada diretamente
-            if (msg.hasMedia) {
-                log('📥 Processando mídia enviada...');
-                await msg.reply('📥 Baixando mídia, aguarde...');
+            setTimeout(() => process.exit(0), 2000);
+            return true;
+        }
 
-                media = await msg.downloadMedia();
-                if (media) {
-                    log('✅ Mídia processada:', {
-                        tipo: media.mimetype,
-                        tamanho: `${(media.data.length * 0.75 / 1024 / 1024).toFixed(2)}MB`
+        // === COMANDO HELP ===
+        if (comando === 'help' || comando === 'ajuda') {
+            const helpMsg =
+                `🤖 *COMANDOS DISPONÍVEIS:*\n\n` +
+                `• *status* - Ver status do bot\n` +
+                `• *test* - Testar funcionamento\n` +
+                `• *sync* - Sincronizar grupos\n` +
+                `• *update* - Verificar atualizações\n` +
+                `• *reset* - Resetar sessão\n` +
+                `• *help* - Esta ajuda\n\n` +
+                `📝 *Para enviar mensagens:*\n` +
+                `• Digite a mensagem normalmente\n` +
+                `• Envie uma imagem com legenda\n` +
+                `• Envie apenas uma URL de imagem`;
+
+            await sock.sendMessage(chatId, { text: helpMsg });
+            return true;
+        }
+
+        // === COMANDO SYNC ===
+        if (comando === 'sync' || comando === 'sincronizar') {
+            await sock.sendMessage(chatId, { text: '🔄 Sincronizando grupos...' });
+
+            try {
+                const result = await syncGroups();
+                await sock.sendMessage(chatId, {
+                    text: `✅ *Sincronização concluída!*\n\n` +
+                        `📊 Grupos encontrados: ${result.found}\n` +
+                        `➕ Novos adicionados: ${result.added}\n` +
+                        `📁 Total registrado: ${result.total}`
+                });
+            } catch (error) {
+                await sock.sendMessage(chatId, { text: `❌ Erro ao sincronizar: ${error.message}` });
+            }
+
+            log('🔄 Sincronização de grupos solicitada por:', senderNumber);
+            return true;
+        }
+
+        // === COMANDO UPDATE ===
+        if (comando === 'update' || comando === 'atualizar') {
+            await sock.sendMessage(chatId, { text: '🔍 Verificando atualizações...' });
+
+            const { exec } = require('child_process');
+
+            exec('git fetch origin && git status -uno', { cwd: __dirname }, async (error, stdout) => {
+                if (error) {
+                    await sock.sendMessage(chatId, { text: `❌ Erro ao verificar: ${error.message}` });
+                    return;
+                }
+
+                if (stdout.includes('behind')) {
+                    await sock.sendMessage(chatId, {
+                        text: `📦 *ATUALIZAÇÃO DISPONÍVEL!*\n\nPara atualizar, execute no servidor:\n\`\`\`\ncd ${__dirname}\ngit pull origin main\nnpm install\nnode bot.js\n\`\`\`\n\nOu execute: *update.bat*`
                     });
+                } else {
+                    await sock.sendMessage(chatId, { text: '✅ Bot já está na versão mais recente!' });
+                }
+            });
+
+            log('🔍 Verificação de atualização solicitada por:', senderNumber);
+            return true;
+        }
+
+        return false; // Não era um comando conhecido
+    } catch (error) {
+        log('❌ Erro ao processar comando:', error.message);
+        await sock.sendMessage(chatId, { text: `❌ Erro: ${error.message}` });
+        return true;
+    }
+}
+
+// === CONEXÃO WHATSAPP COM BAILEYS ===
+async function startWhatsApp() {
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
+        const { version } = await fetchLatestBaileysVersion();
+
+        log(`🚀 Iniciando WhatsApp com Baileys v${version.join('.')}`);
+        console.log(`🚀 Iniciando WhatsApp com Baileys v${version.join('.')}`);
+
+        sock = makeWASocket({
+            version,
+            logger,
+            printQRInTerminal: false,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger),
+            },
+            browser: Browsers.ubuntu('Chrome'),
+            generateHighQualityLinkPreview: false,
+            syncFullHistory: false,
+            markOnlineOnConnect: true,
+        });
+
+        // Salvar credenciais
+        sock.ev.on('creds.update', saveCreds);
+
+        // Handler de conexão
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                console.log('\n' + '='.repeat(50));
+                console.log('📱 QR CODE GERADO - ESCANEIE COM SEU WHATSAPP');
+                console.log('='.repeat(50));
+
+                // Gerar QR no terminal
+                const qrString = await qrcode.toString(qr, { type: 'terminal', small: true });
+                console.log(qrString);
+                console.log('='.repeat(50) + '\n');
+
+                log('🔲 QR Code gerado - Aguardando leitura pelo WhatsApp');
+            }
+
+            if (connection === 'open') {
+                isConnected = true;
+                const user = sock.user;
+                log('🎉 WhatsApp conectado e pronto para uso!');
+                console.log('🎉 WhatsApp conectado e pronto para uso!');
+                console.log(`📱 Conectado como: ${user?.name || 'N/A'}`);
+                console.log(`📞 Número: ${user?.id?.split(':')[0] || 'N/A'}`);
+                console.log(`🤖 Bot operacional às ${new Date().toLocaleTimeString()}`);
+
+                // Sincronizar grupos existentes ao conectar
+                console.log('🔄 Sincronizando grupos existentes...');
+                setTimeout(async () => {
+                    try {
+                        const result = await syncGroups();
+                        console.log(`✅ Grupos sincronizados: ${result.found} encontrados, ${result.added} novos`);
+                        log(`✅ Grupos sincronizados: ${result.found} encontrados, ${result.added} novos adicionados`);
+                    } catch (error) {
+                        log('⚠️ Erro ao sincronizar grupos:', error.message);
+                    }
+                }, 3000); // Aguarda 3s para garantir que a conexão está estável
+            }
+
+            if (connection === 'close') {
+                isConnected = false;
+                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+
+                log('❌ WhatsApp desconectado:', lastDisconnect?.error?.message || 'Motivo desconhecido');
+                console.log('❌ WhatsApp desconectado');
+
+                if (shouldReconnect) {
+                    console.log('🔄 Tentando reconectar em 5 segundos...');
+                    setTimeout(startWhatsApp, 5000);
+                } else {
+                    console.log('🚫 Sessão encerrada (logout). Execute novamente para novo QR Code.');
+                    log('🚫 Sessão encerrada por logout');
                 }
             }
-            // Verificar se é URL de mídia
-            else if (/https?:\/\/.+\.(jpg|jpeg|png|gif|webp|mp4|mov|avi)/i.test(content)) {
-                imageUrl = content.trim();
-                content = ''; // Limpar texto pois é apenas URL
-                log('🔗 URL de mídia detectada:', imageUrl);
+        });
+
+        // Handler de mensagens
+        sock.ev.on('messages.upsert', async ({ messages, type }) => {
+            if (type !== 'notify') return;
+
+            for (const msg of messages) {
+                try {
+                    // Ignorar mensagens do próprio bot
+                    if (msg.key.fromMe) continue;
+
+                    // Pegar ID do remetente
+                    const chatId = msg.key.remoteJid;
+                    if (!chatId) continue;
+
+                    // Verificar se é mensagem privada (não grupo)
+                    const isGroup = chatId.endsWith('@g.us');
+                    if (isGroup) continue; // Ignorar mensagens de grupos
+
+                    // Pegar número do remetente
+                    const senderNumber = chatId.replace('@s.whatsapp.net', '');
+                    const admins = getAdmins();
+
+                    if (!admins.includes(senderNumber)) {
+                        log('⛔ Comando não autorizado de:', senderNumber);
+                        continue;
+                    }
+
+                    // Verificar se é um comando
+                    const isCommand = await processCommand(msg, senderNumber);
+                    if (isCommand) continue;
+
+                    // === PROCESSAMENTO DE MENSAGENS E MÍDIAS ===
+                    const messageText = msg.message?.conversation ||
+                        msg.message?.extendedTextMessage?.text ||
+                        msg.message?.imageMessage?.caption || '';
+
+                    let content = messageText;
+                    let media = null;
+                    let imageUrl = null;
+
+                    // Verificar se há grupos cadastrados
+                    const wppGroups = readJson(WHATSAPP_GROUPS_DB);
+                    const tgChats = readJson(TELEGRAM_CHATS_DB);
+
+                    if (wppGroups.length === 0 && tgChats.length === 0) {
+                        await sock.sendMessage(chatId, { text: '❌ Nenhum grupo ou canal registrado ainda.' });
+                        continue;
+                    }
+
+                    // Processar mídia enviada
+                    if (msg.message?.imageMessage || msg.message?.videoMessage || msg.message?.documentMessage) {
+                        log('📥 Processando mídia enviada...');
+                        await sock.sendMessage(chatId, { text: '📥 Baixando mídia, aguarde...' });
+
+                        const { downloadMediaMessage } = require('@anubis-pro/baileys');
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+
+                        if (buffer) {
+                            const mimetype = msg.message?.imageMessage?.mimetype ||
+                                msg.message?.videoMessage?.mimetype ||
+                                msg.message?.documentMessage?.mimetype || 'application/octet-stream';
+
+                            media = { buffer, mimetype };
+                            content = msg.message?.imageMessage?.caption ||
+                                msg.message?.videoMessage?.caption || '';
+
+                            log('✅ Mídia processada:', { tipo: mimetype, tamanho: `${(buffer.length / 1024 / 1024).toFixed(2)}MB` });
+                        }
+                    }
+                    // Verificar se é URL de mídia
+                    else if (/https?:\/\/.+\.(jpg|jpeg|png|gif|webp|mp4|mov|avi)/i.test(content)) {
+                        imageUrl = content.trim();
+                        content = '';
+                        log('🔗 URL de mídia detectada:', imageUrl);
+                    }
+
+                    // Enviar para todos os grupos
+                    if (content || media || imageUrl) {
+                        await sock.sendMessage(chatId, { text: '📤 Enviando para todos os grupos...' });
+
+                        const resultado = await sendToAll(
+                            content || '📣 Nova mensagem do admin!',
+                            imageUrl,
+                            media
+                        );
+
+                        await sock.sendMessage(chatId, { text: `✅ ${resultado.resumo}` });
+                        log('📤 Envio solicitado por admin:', senderNumber);
+                    } else {
+                        await sock.sendMessage(chatId, { text: '❌ Envie uma mensagem, imagem ou URL válida.' });
+                    }
+
+                } catch (error) {
+                    log('⚠️ Erro ao processar mensagem:', error.message);
+                }
             }
+        });
 
-            // Enviar para todos os grupos
-            if (content || media || imageUrl) {
-                await msg.reply('📤 Enviando para todos os grupos...');
-
-                const resultado = await sendToAll(
-                    content || '📣 Nova mensagem do admin!',
-                    imageUrl,
-                    media
-                );
-
-                await msg.reply(`✅ ${resultado.resumo}`);
-                log('📤 Envio solicitado por admin:', senderNumber);
-            } else {
-                await msg.reply('❌ Envie uma mensagem, imagem ou URL válida.');
+        // Handler de grupos (auto-cadastro)
+        sock.ev.on('groups.upsert', async (groups) => {
+            for (const group of groups) {
+                const groupList = readJson(WHATSAPP_GROUPS_DB);
+                if (!groupList.includes(group.id)) {
+                    groupList.push(group.id);
+                    writeJson(WHATSAPP_GROUPS_DB, groupList);
+                    log('🟢 Entrou em novo grupo WhatsApp:', group.id, group.subject || 'N/A');
+                }
             }
+        });
 
-        } catch (error) {
-            log('❌ Erro ao processar comando:', error.message);
-            await msg.reply(`❌ Erro: ${error.message}`);
-        }
-    } catch (outerError) {
-        // Captura erros externos como o 'markedUnread' que vem do WhatsApp Web
-        log('⚠️ Erro externo capturado (WhatsApp Web):', outerError.message);
+        // Handler de participantes (detectar quando bot sai do grupo)
+        sock.ev.on('group-participants.update', async ({ id, participants, action }) => {
+            if (action === 'remove') {
+                const myId = sock.user?.id?.split(':')[0] + '@s.whatsapp.net';
+                if (participants.includes(myId)) {
+                    const updated = readJson(WHATSAPP_GROUPS_DB).filter(gid => gid !== id);
+                    writeJson(WHATSAPP_GROUPS_DB, updated);
+                    log('🔴 Bot removido do grupo WhatsApp:', id);
+                }
+            }
+        });
+
+    } catch (error) {
+        log('❌ Erro na inicialização do WhatsApp:', error.message);
+        console.error('❌ Erro na inicialização:', error);
+        console.log('🔄 Tentando novamente em 10 segundos...');
+        setTimeout(startWhatsApp, 10000);
     }
-});
+}
 
-// === API EXPRESS MELHORADA ===
+// === API EXPRESS ===
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -580,9 +730,10 @@ app.get('/status', (req, res) => {
 
     res.json({
         whatsapp: {
-            connected: !!wpp.info,
+            connected: isConnected,
             groups: wppGroups.length,
-            info: wpp.info || null
+            user: sock?.user || null,
+            library: 'Baileys (@anubis-pro/baileys)'
         },
         telegram: {
             active: !!telegramBot,
@@ -595,7 +746,7 @@ app.get('/status', (req, res) => {
 
 // Endpoint de saúde
 app.get('/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date().toISOString() });
+    res.json({ status: 'OK', timestamp: new Date().toISOString(), library: 'Baileys' });
 });
 
 const PORT = process.env.PORT || 3000;
@@ -607,53 +758,14 @@ app.listen(PORT, () => {
     console.log(`   GET  http://localhost:${PORT}/health`);
 });
 
-// === INICIALIZAÇÃO ROBUSTA DO WHATSAPP ===
-let initAttempts = 0;
-const maxAttempts = 3;
-
-async function initializeWhatsApp() {
-    try {
-        initAttempts++;
-        log(`🚀 Tentativa ${initAttempts}/${maxAttempts} de conectar WhatsApp...`);
-        console.log(`🚀 Tentativa ${initAttempts}/${maxAttempts} de conectar WhatsApp...`);
-
-        await wpp.initialize();
-
-        // Timeout para verificar conexão
-        setTimeout(() => {
-            if (!wpp.info && initAttempts <= maxAttempts) {
-                log('⏰ Timeout de conexão WhatsApp - Tentando novamente...');
-                console.log('⏰ WhatsApp não conectou em 90 segundos');
-
-                if (initAttempts < maxAttempts) {
-                    setTimeout(() => initializeWhatsApp(), 5000);
-                } else {
-                    console.log('❌ Máximo de tentativas atingido');
-                    console.log('💡 Tente: node bot.js --clear-session');
-                }
-            }
-        }, 90000);
-
-    } catch (error) {
-        log('❌ Erro na inicialização do WhatsApp:', error.message);
-
-        if (initAttempts < maxAttempts) {
-            log('🔄 Tentando novamente em 10 segundos...');
-            setTimeout(() => initializeWhatsApp(), 10000);
-        } else {
-            log('❌ Falha total na inicialização do WhatsApp');
-        }
-    }
-}
-
 // === TRATAMENTO DE SINAIS E LIMPEZA ===
 process.on('SIGINT', async () => {
     log('🛑 Encerrando bot...');
     console.log('\n🛑 Encerrando bot graciosamente...');
 
     try {
-        if (wpp.info) {
-            await wpp.destroy();
+        if (sock) {
+            await sock.end();
         }
         if (telegramBot) {
             await telegramBot.stopPolling();
@@ -671,16 +783,16 @@ process.on('uncaughtException', (error) => {
     console.error('❌ Exceção não capturada:', error);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
     log('❌ Promise rejeitada:', reason);
     console.error('❌ Promise rejeitada:', reason);
 });
 
 // === INICIALIZAR BOT ===
-console.log('🤖 Iniciando Bot de Broadcast...');
+console.log('🤖 Iniciando Bot de Broadcast (Baileys)...');
 console.log('📝 Logs salvos em:', LOG_FILE);
-console.log('⚙️ Para limpar sessão: node bot.js --clear-session');
+console.log('📦 Usando biblioteca: @anubis-pro/baileys');
 console.log('-'.repeat(60));
 
-log('🤖 Bot iniciado');
-initializeWhatsApp();
+log('🤖 Bot iniciado com Baileys');
+startWhatsApp();
