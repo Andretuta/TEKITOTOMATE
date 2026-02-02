@@ -444,7 +444,6 @@ async function sendToAll(message, imageUrl = null, directMedia = null, useTwitte
         telegram: { sucessos: tgResults.success, falhas: tgResults.failed, erros: tgResults.errors },
         twitter: twitterResult,
         tempoTotal: elapsed + 's',
-        tempoTotal: elapsed + 's',
         resumo
     };
 }
@@ -612,11 +611,6 @@ async function processCommand(msg, senderNumber) {
                         log('❌ Erro ao baixar imagem citada:', e.message);
                     }
                 }
-            }
-
-            if (!textToPost && !mediaBuffer) {
-                await sock.sendMessage(chatId, { text: '❌ Conteúdo vazio.\nUse: */x Seu Texto*\nOu envie uma foto com a legenda */x*\nOu responda a uma foto com */x*' });
-                return true;
             }
 
             if (!textToPost && !mediaBuffer) {
