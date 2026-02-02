@@ -14,3 +14,6 @@ groups.json
 .DS_Store
 Thumbs.db
 cookies.json
+
+# Arquivos de configuração com chaves de API
+.roo/mcp.json
