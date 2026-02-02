@@ -342,7 +342,7 @@ async function sendToTwitter(message, media) {
 }
 
 // === FUNÇÃO DE ENVIO PRINCIPAL ===
-async function sendToAll(message, imageUrl = null, directMedia = null) {
+async function sendToAll(message, imageUrl = null, directMedia = null, useTwitter = false) {
     const wppGroups = readJson(WHATSAPP_GROUPS_DB);
     const tgChats = readJson(TELEGRAM_CHATS_DB);
     let media = directMedia;
@@ -361,7 +361,8 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         hasUrl: !!imageUrl,
         wppGroups: wppGroups.length,
         tgChats: tgChats.length,
-        whatsappReady: isConnected
+        whatsappReady: isConnected,
+        twitter: useTwitter
     });
 
 
@@ -372,7 +373,7 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
 
     // Envio para Twitter
     const twitterPromise = (async () => {
-        if (process.env.TWITTER_USERNAME) { // Tenta se tiver user configurado
+        if (useTwitter && process.env.TWITTER_USERNAME) { // Só envia se solicitado E configurado
             log('🐦 Iniciando envio para Twitter...');
             return await sendToTwitter(message, media);
         }
@@ -618,14 +619,23 @@ async function processCommand(msg, senderNumber) {
                 return true;
             }
 
-            // Enviar para função do Twitter
-            const mediaObj = mediaBuffer ? { buffer: mediaBuffer, mimetype: mimeType } : null;
-            const result = await sendToTwitter(textToPost, mediaObj);
+            if (!textToPost && !mediaBuffer) {
+                await sock.sendMessage(chatId, { text: '❌ Conteúdo vazio.\nUse: */x Seu Texto*\nOu envie uma foto com a legenda */x*\nOu responda a uma foto com */x*' });
+                return true;
+            }
 
-            if (result.success) {
-                await sock.sendMessage(chatId, { text: '✅ Tweet postado com sucesso no X!' });
-            } else {
-                await sock.sendMessage(chatId, { text: `❌ Erro ao postar no Twitter: ${result.error}` });
+            // Enviar para TODOS (Grupos + Twitter ativado)
+            const mediaObj = mediaBuffer ? { buffer: mediaBuffer, mimetype: mimeType } : null;
+
+            await sock.sendMessage(chatId, { text: '📤 Enviando broadcast global (WPP + Telegram + X)...' });
+
+            const result = await sendToAll(textToPost, null, mediaObj, true); // true = USE TWITTER
+
+            await sock.sendMessage(chatId, { text: `✅ ${result.resumo}` });
+            if (result.twitter.success) {
+                await sock.sendMessage(chatId, { text: '✅ Tweet postado!' });
+            } else if (!result.twitter.skipped) {
+                await sock.sendMessage(chatId, { text: `❌ Erro no Twitter: ${result.twitter.error}` });
             }
 
             return true;
@@ -797,13 +807,15 @@ async function startWhatsApp() {
                     }
 
                     // Enviar para todos os grupos
+                    // Enviar para todos os grupos (sem Twitter por padrão)
                     if (content || media || imageUrl) {
-                        await sock.sendMessage(chatId, { text: '📤 Enviando para todos os grupos e Twitter...' });
+                        await sock.sendMessage(chatId, { text: '📤 Enviando para todos os grupos...' });
 
                         const resultado = await sendToAll(
                             content || '📣 Nova mensagem do admin!',
                             imageUrl,
-                            media
+                            media,
+                            false // false = NÃO postar no Twitter (padrão)
                         );
 
                         await sock.sendMessage(chatId, { text: `✅ ${resultado.resumo}` });
