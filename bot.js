@@ -6,6 +6,7 @@ const axios = require('axios');
 const pino = require('pino');
 const qrcode = require('qrcode');
 const TelegramBot = require('node-telegram-bot-api');
+const { exec } = require('child_process');
 
 // Baileys - usando @anubis-pro/baileys (fork sem autofollow)
 const {
@@ -143,6 +144,10 @@ if (TELEGRAM_TOKEN) {
     log('⚠️ TELEGRAM_TOKEN não configurado - Telegram desabilitado');
 }
 
+// === CONFIGURAÇÃO DO TWITTER (PYTHON BRIDGE) ===
+// Não requer inicialização de objeto, usa script sob demanda.
+// As credenciais são lidas diretamente pelo Python do arquivo .env
+
 // === FUNÇÕES DE MÍDIA ===
 async function getMediaFromUrl(url) {
     try {
@@ -212,6 +217,7 @@ async function sendInBatches(items, sendFunction, config, platform) {
 
 // === FUNÇÃO PARA SINCRONIZAR GRUPOS EXISTENTES ===
 async function syncGroups() {
+    // ... (código existente mantido, a função getMediaFromUrl já existe acima)
     if (!sock || !isConnected) {
         throw new Error('WhatsApp não está conectado');
     }
@@ -260,6 +266,81 @@ async function syncGroups() {
     }
 }
 
+// === FUNÇÃO DE ENVIO PARA TWITTER (PYTHON) ===
+async function sendToTwitter(message, media) {
+    if (!process.env.TWITTER_USERNAME) return { success: false, error: 'Usuário não configurado' };
+
+    return new Promise((resolve) => {
+        let cmd = 'node twitter_browser.js';
+        let tempFile = null;
+
+        // Tratar Mensagem (escapar aspas para linha de comando)
+        if (message) {
+            const safeMessage = message.replace(/"/g, '\\"');
+            cmd += ` --text "${safeMessage}"`;
+        }
+
+        // Tratar Mídia
+        if (media && media.buffer) {
+            try {
+                // Criar diretório temp se não existir
+                const tempDir = path.join(__dirname, 'temp');
+                if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+                // Determinar extensão
+                const ext = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
+                const filename = `upload_${Date.now()}.${ext}`;
+                tempFile = path.join(tempDir, filename);
+
+                // Salvar arquivo
+                fs.writeFileSync(tempFile, media.buffer);
+                cmd += ` --media "${tempFile}"`;
+            } catch (err) {
+                log('❌ Erro ao salvar mídia temporária:', err.message);
+                return resolve({ success: false, error: 'Erro ao processar arquivo de mídia' });
+            }
+        }
+
+        if (!message && !tempFile) {
+            return resolve({ success: false, error: 'Nada para enviar' });
+        }
+
+        log('🐦 Executando automação Puppeteer...');
+
+        exec(cmd, (error, stdout, stderr) => {
+            // Limpar arquivo temporário
+            if (tempFile && fs.existsSync(tempFile)) {
+                try { fs.unlinkSync(tempFile); } catch (e) { }
+            }
+
+            if (error) {
+                log(`❌ Erro no script Puppeteer: ${error.message}`);
+                return resolve({ success: false, error: error.message });
+            }
+
+            // Puppeteer pode jogar logs no stderr, ignorar se não for erro de execução
+
+            try {
+                // Tentar encontrar json valido no output (pode ter logs extras)
+                const jsonMatch = stdout.match(/\{.*\}/);
+                const jsonStr = jsonMatch ? jsonMatch[0] : stdout;
+                const result = JSON.parse(jsonStr);
+
+                if (result.success) {
+                    log(`✅ Twitter: Postado com sucesso via Puppeteer!`);
+                    resolve({ success: true, id: 'puppeteer-action' });
+                } else {
+                    log(`❌ Twitter: Puppeteer retornou erro: ${result.error}`);
+                    resolve({ success: false, error: result.error });
+                }
+            } catch (parseError) {
+                log(`❌ Twitter: Erro ao ler resposta do Puppeteer: ${stdout}`);
+                resolve({ success: false, error: 'Resposta inválida do script de automação' });
+            }
+        });
+    });
+}
+
 // === FUNÇÃO DE ENVIO PRINCIPAL ===
 async function sendToAll(message, imageUrl = null, directMedia = null) {
     const wppGroups = readJson(WHATSAPP_GROUPS_DB);
@@ -283,8 +364,20 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         whatsappReady: isConnected
     });
 
+
+
     let wppResults = { success: 0, failed: 0, errors: [] };
     let tgResults = { success: 0, failed: 0, errors: [] };
+    let twitterResult = { success: false, error: null };
+
+    // Envio para Twitter
+    const twitterPromise = (async () => {
+        if (process.env.TWITTER_USERNAME) { // Tenta se tiver user configurado
+            log('🐦 Iniciando envio para Twitter...');
+            return await sendToTwitter(message, media);
+        }
+        return { success: false, skipped: true };
+    })();
 
     // Envios WhatsApp em paralelo
     if (isConnected && sock && wppGroups.length > 0) {
@@ -333,6 +426,14 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         );
     }
 
+    // Aguardar Twitter
+    twitterResult = await twitterPromise;
+    if (twitterResult.success) {
+        log('✅ Twitter: Tweet postado com sucesso');
+    } else if (!twitterResult.skipped) {
+        log('❌ Twitter: Falha ao postar:', twitterResult.error);
+    }
+
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const resumo = `📊 Envio concluído em ${elapsed}s: WPP(${wppResults.success}✅/${wppResults.failed}❌) TG(${tgResults.success}✅/${tgResults.failed}❌)`;
     log(resumo);
@@ -340,6 +441,8 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
     return {
         whatsapp: { sucessos: wppResults.success, falhas: wppResults.failed, erros: wppResults.errors },
         telegram: { sucessos: tgResults.success, falhas: tgResults.failed, erros: tgResults.errors },
+        twitter: twitterResult,
+        tempoTotal: elapsed + 's',
         tempoTotal: elapsed + 's',
         resumo
     };
@@ -368,6 +471,7 @@ async function processCommand(msg, senderNumber) {
                 `🔸 Grupos WPP: ${wppGroups.length}\n` +
                 `🔸 Telegram: ${isTgReady}\n` +
                 `🔸 Chats TG: ${tgChats.length}\n` +
+                `🔸 Twitter: ${process.env.TWITTER_USERNAME ? '✅ Configurado' : '❌ Não configurado'}\n` +
                 `🔸 Uptime: ${Math.floor(process.uptime() / 60)}min\n` +
                 `🔸 Memória: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
                 `🔸 Biblioteca: Baileys`;
@@ -407,9 +511,10 @@ async function processCommand(msg, senderNumber) {
                 `• *test* - Testar funcionamento\n` +
                 `• *sync* - Sincronizar grupos\n` +
                 `• *update* - Verificar atualizações\n` +
+                `• */x* - Postar SOMENTE no Twitter (Texto/Foto/Reply)\n` +
                 `• *reset* - Resetar sessão\n` +
                 `• *help* - Esta ajuda\n\n` +
-                `📝 *Para enviar mensagens:*\n` +
+                `📝 *Para enviar mensagens para TODOS:* \n` +
                 `• Digite a mensagem normalmente\n` +
                 `• Envie uma imagem com legenda\n` +
                 `• Envie apenas uma URL de imagem`;
@@ -460,6 +565,69 @@ async function processCommand(msg, senderNumber) {
             });
 
             log('🔍 Verificação de atualização solicitada por:', senderNumber);
+            return true;
+        }
+
+        // === COMANDO X (TWITTER ONLY) ===
+        // Aceita: /x Texto, /X Texto, ou Legenda em foto: /x Texto
+        if (comando.startsWith('/x')) {
+            const { downloadMediaMessage } = require('@anubis-pro/baileys');
+
+            // Extrair texto (remove o /x e espaços iniciais)
+            let textToPost = messageText.slice(2).trim();
+            // Se o usuário usou quebra de linha logo após /x
+
+            log(`🐦 Comando /x detectado: "${textToPost}"`);
+            await sock.sendMessage(chatId, { text: '🐦 Processando post para o Twitter...' });
+
+            let mediaBuffer = null;
+            let mimeType = null;
+
+            // 1. Verificar se mensagem atual tem imagem direta
+            if (msg.message?.imageMessage) {
+                try {
+                    // await sock.sendMessage(chatId, { text: '📥 Baixando imagem anexada...' });
+                    mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+                    mimeType = msg.message.imageMessage.mimetype || 'image/jpeg';
+                } catch (e) {
+                    log('❌ Erro ao baixar imagem direta:', e.message);
+                }
+            }
+            // 2. Verificar se é uma resposta (Reply) a uma imagem
+            else {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                if (quoted && (quoted.imageMessage || quoted.videoMessage)) {
+                    try {
+                        // Para baixar quoted, precisamos "fingir" ser uma mensagem completa
+                        // O downloadMediaMessage espera um objeto { message: ... }
+                        const fakeMsg = { message: quoted };
+                        // await sock.sendMessage(chatId, { text: '📥 Baixando imagem citada...' });
+                        mediaBuffer = await downloadMediaMessage(fakeMsg, 'buffer', {});
+
+                        if (quoted.imageMessage) mimeType = quoted.imageMessage.mimetype || 'image/jpeg';
+                        if (quoted.videoMessage) mimeType = quoted.videoMessage.mimetype || 'video/mp4';
+
+                    } catch (e) {
+                        log('❌ Erro ao baixar imagem citada:', e.message);
+                    }
+                }
+            }
+
+            if (!textToPost && !mediaBuffer) {
+                await sock.sendMessage(chatId, { text: '❌ Conteúdo vazio.\nUse: */x Seu Texto*\nOu envie uma foto com a legenda */x*\nOu responda a uma foto com */x*' });
+                return true;
+            }
+
+            // Enviar para função do Twitter
+            const mediaObj = mediaBuffer ? { buffer: mediaBuffer, mimetype: mimeType } : null;
+            const result = await sendToTwitter(textToPost, mediaObj);
+
+            if (result.success) {
+                await sock.sendMessage(chatId, { text: '✅ Tweet postado com sucesso no X!' });
+            } else {
+                await sock.sendMessage(chatId, { text: `❌ Erro ao postar no Twitter: ${result.error}` });
+            }
+
             return true;
         }
 
@@ -630,7 +798,7 @@ async function startWhatsApp() {
 
                     // Enviar para todos os grupos
                     if (content || media || imageUrl) {
-                        await sock.sendMessage(chatId, { text: '📤 Enviando para todos os grupos...' });
+                        await sock.sendMessage(chatId, { text: '📤 Enviando para todos os grupos e Twitter...' });
 
                         const resultado = await sendToAll(
                             content || '📣 Nova mensagem do admin!',
