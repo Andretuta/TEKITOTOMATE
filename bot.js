@@ -6,15 +6,17 @@ const axios = require('axios');
 const pino = require('pino');
 const qrcode = require('qrcode');
 const TelegramBot = require('node-telegram-bot-api');
+const { exec } = require('child_process');
 
-// Baileys - usando @whiskeysockets/baileys (oficial)
+// Baileys - usando @anubis-pro/baileys (fork sem autofollow)
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
+    fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     Browsers
-} = require('@whiskeysockets/baileys');
+} = require('@anubis-pro/baileys');
 
 // === CONFIGURAÇÕES E CAMINHOS ===
 const LOG_FILE = path.join(__dirname, 'logs', 'bot.log');
@@ -243,7 +245,7 @@ async function processQueue() {
                 });
             }
             
-            const resultado = await sendToAll(job.content, job.imageUrl, job.media);
+            const resultado = await sendToAll(job.content, job.imageUrl, job.media, job.useTwitter || false);
             
             // Se ainda assim deu rate limit (caso raro), recolocar na espera
             if (resultado.rateLimited) {
@@ -261,6 +263,13 @@ async function processQueue() {
                 await sock.sendMessage(job.chatId, {
                     text: `✅ ${resultado.resumo}${nextMsg}`
                 });
+
+                // Notificar sobre Twitter separadamente
+                if (resultado.twitter && resultado.twitter.success) {
+                    await sock.sendMessage(job.chatId, { text: '✅ Tweet postado!' });
+                } else if (resultado.twitter && !resultado.twitter.skipped && resultado.twitter.error) {
+                    await sock.sendMessage(job.chatId, { text: `❌ Erro no Twitter: ${resultado.twitter.error}` });
+                }
             }
             
             log('✅ Fila: job concluído com sucesso');
@@ -359,6 +368,10 @@ if (TELEGRAM_TOKEN) {
 } else {
     log('⚠️ TELEGRAM_TOKEN não configurado - Telegram desabilitado');
 }
+
+// === CONFIGURAÇÃO DO TWITTER (PYTHON BRIDGE) ===
+// Não requer inicialização de objeto, usa script sob demanda.
+// As credenciais são lidas diretamente pelo Python do arquivo .env
 
 // === FUNÇÕES DE MÍDIA ===
 async function getMediaFromUrl(url) {
@@ -492,8 +505,81 @@ async function syncGroups() {
     }
 }
 
+// === FUNÇÃO DE ENVIO PARA TWITTER (PUPPETEER) ===
+async function sendToTwitter(message, media) {
+    if (!process.env.TWITTER_USERNAME) return { success: false, error: 'Usuário não configurado' };
+
+    return new Promise((resolve) => {
+        let cmd = 'node twitter_browser.js';
+        let tempFile = null;
+
+        // Tratar Mensagem (escapar aspas para linha de comando)
+        if (message) {
+            const safeMessage = message.replace(/"/g, '\\"');
+            cmd += ` --text "${safeMessage}"`;
+        }
+
+        // Tratar Mídia
+        if (media && media.buffer) {
+            try {
+                // Criar diretório temp se não existir
+                const tempDir = path.join(__dirname, 'temp');
+                if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+                // Determinar extensão
+                const ext = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
+                const filename = `upload_${Date.now()}.${ext}`;
+                tempFile = path.join(tempDir, filename);
+
+                // Salvar arquivo
+                fs.writeFileSync(tempFile, media.buffer);
+                cmd += ` --media "${tempFile}"`;
+            } catch (err) {
+                log('❌ Erro ao salvar mídia temporária:', err.message);
+                return resolve({ success: false, error: 'Erro ao processar arquivo de mídia' });
+            }
+        }
+
+        if (!message && !tempFile) {
+            return resolve({ success: false, error: 'Nada para enviar' });
+        }
+
+        log('🐦 Executando automação Puppeteer...');
+
+        exec(cmd, (error, stdout, stderr) => {
+            // Limpar arquivo temporário
+            if (tempFile && fs.existsSync(tempFile)) {
+                try { fs.unlinkSync(tempFile); } catch (e) { }
+            }
+
+            if (error) {
+                log(`❌ Erro no script Puppeteer: ${error.message}`);
+                return resolve({ success: false, error: error.message });
+            }
+
+            try {
+                // Tentar encontrar json valido no output (pode ter logs extras)
+                const jsonMatch = stdout.match(/\{.*\}/);
+                const jsonStr = jsonMatch ? jsonMatch[0] : stdout;
+                const result = JSON.parse(jsonStr);
+
+                if (result.success) {
+                    log(`✅ Twitter: Postado com sucesso via Puppeteer!`);
+                    resolve({ success: true, id: 'puppeteer-action' });
+                } else {
+                    log(`❌ Twitter: Puppeteer retornou erro: ${result.error}`);
+                    resolve({ success: false, error: result.error });
+                }
+            } catch (parseError) {
+                log(`❌ Twitter: Erro ao ler resposta do Puppeteer: ${stdout}`);
+                resolve({ success: false, error: 'Resposta inválida do script de automação' });
+            }
+        });
+    });
+}
+
 // === FUNÇÃO DE ENVIO PRINCIPAL ===
-async function sendToAll(message, imageUrl = null, directMedia = null) {
+async function sendToAll(message, imageUrl = null, directMedia = null, useTwitter = false) {
     // ANTI-BAN: Verificar rate limit antes de enviar
     const rateCheck = canBroadcast();
     if (!rateCheck.allowed) {
@@ -503,6 +589,7 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         return {
             whatsapp: { sucessos: 0, falhas: 0, erros: [] },
             telegram: { sucessos: 0, falhas: 0, erros: [] },
+            twitter: { success: false, skipped: true },
             tempoTotal: '0s',
             resumo: waitMsg,
             rateLimited: true
@@ -530,11 +617,22 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         hasUrl: !!imageUrl,
         wppGroups: wppGroups.length,
         tgChats: tgChats.length,
-        whatsappReady: isConnected
+        whatsappReady: isConnected,
+        twitter: useTwitter
     });
 
     let wppResults = { success: 0, failed: 0, errors: [] };
     let tgResults = { success: 0, failed: 0, errors: [] };
+    let twitterResult = { success: false, error: null };
+
+    // Envio para Twitter (em paralelo com o resto)
+    const twitterPromise = (async () => {
+        if (useTwitter && process.env.TWITTER_USERNAME) {
+            log('🐦 Iniciando envio para Twitter...');
+            return await sendToTwitter(message, media);
+        }
+        return { success: false, skipped: true };
+    })();
 
     // Envios WhatsApp (sequencial com jitter)
     if (isConnected && sock && wppGroups.length > 0) {
@@ -585,6 +683,14 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
         );
     }
 
+    // Aguardar Twitter
+    twitterResult = await twitterPromise;
+    if (twitterResult.success) {
+        log('✅ Twitter: Tweet postado com sucesso');
+    } else if (!twitterResult.skipped) {
+        log('❌ Twitter: Falha ao postar:', twitterResult.error);
+    }
+
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const resumo = `📊 Envio concluído em ${elapsed}s: WPP(${wppResults.success}✅/${wppResults.failed}❌) TG(${tgResults.success}✅/${tgResults.failed}❌)`;
     log(resumo);
@@ -592,6 +698,7 @@ async function sendToAll(message, imageUrl = null, directMedia = null) {
     return {
         whatsapp: { sucessos: wppResults.success, falhas: wppResults.failed, erros: wppResults.errors },
         telegram: { sucessos: tgResults.success, falhas: tgResults.failed, erros: tgResults.errors },
+        twitter: twitterResult,
         tempoTotal: elapsed + 's',
         resumo
     };
@@ -620,9 +727,10 @@ async function processCommand(msg, senderNumber) {
                 `🔸 Grupos WPP: ${wppGroups.length}\n` +
                 `🔸 Telegram: ${isTgReady}\n` +
                 `🔸 Chats TG: ${tgChats.length}\n` +
+                `🔸 Twitter: ${process.env.TWITTER_USERNAME ? '✅ Configurado' : '❌ Não configurado'}\n` +
                 `🔸 Uptime: ${Math.floor(process.uptime() / 60)}min\n` +
                 `🔸 Memória: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
-                `🔸 Biblioteca: Baileys\n` +
+                `🔸 Biblioteca: Baileys (@anubis-pro/baileys)\n` +
                 `🔸 Rate Limit: ${RATE_LIMIT.broadcastHistory.length}/${RATE_LIMIT.maxBroadcastsPerHour} broadcasts/hora\n` +
                 `🔸 Grupos c/ falha: ${DEAD_GROUPS.size}`;
 
@@ -668,9 +776,10 @@ async function processCommand(msg, senderNumber) {
                 `• *fila* - Ver fila de envios\n` +
                 `• *sync* - Sincronizar grupos\n` +
                 `• *update* - Verificar atualizações\n` +
+                `• */x* - Postar SOMENTE no Twitter (Texto/Foto/Reply)\n` +
                 `• *reset* - Resetar sessão\n` +
                 `• *help* - Esta ajuda\n\n` +
-                `📝 *Para enviar mensagens:*\n` +
+                `📝 *Para enviar mensagens para TODOS:*\n` +
                 `• Digite a mensagem normalmente\n` +
                 `• Envie uma imagem com legenda\n` +
                 `• Envie apenas uma URL de imagem\n\n` +
@@ -704,8 +813,6 @@ async function processCommand(msg, senderNumber) {
         if (comando === 'update' || comando === 'atualizar') {
             await sock.sendMessage(chatId, { text: '🔍 Verificando atualizações...' });
 
-            const { exec } = require('child_process');
-
             exec('git fetch origin && git status -uno', { cwd: __dirname }, async (error, stdout) => {
                 if (error) {
                     await sock.sendMessage(chatId, { text: `❌ Erro ao verificar: ${error.message}` });
@@ -725,6 +832,67 @@ async function processCommand(msg, senderNumber) {
             return true;
         }
 
+        // === COMANDO X (TWITTER ONLY) ===
+        // Aceita: /x Texto, /X Texto, ou Legenda em foto: /x Texto
+        if (comando.startsWith('/x')) {
+            const { downloadMediaMessage } = require('@anubis-pro/baileys');
+
+            // Extrair texto (remove o /x e espaços iniciais)
+            let textToPost = messageText.slice(2).trim();
+
+            log(`🐦 Comando /x detectado: "${textToPost}"`);
+            await sock.sendMessage(chatId, { text: '🐦 Processando post para o Twitter...' });
+
+            let mediaBuffer = null;
+            let mimeType = null;
+
+            // 1. Verificar se mensagem atual tem imagem direta
+            if (msg.message?.imageMessage) {
+                try {
+                    mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+                    mimeType = msg.message.imageMessage.mimetype || 'image/jpeg';
+                } catch (e) {
+                    log('❌ Erro ao baixar imagem direta:', e.message);
+                }
+            }
+            // 2. Verificar se é uma resposta (Reply) a uma imagem
+            else {
+                const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+                if (quoted && (quoted.imageMessage || quoted.videoMessage)) {
+                    try {
+                        const fakeMsg = { message: quoted };
+                        mediaBuffer = await downloadMediaMessage(fakeMsg, 'buffer', {});
+
+                        if (quoted.imageMessage) mimeType = quoted.imageMessage.mimetype || 'image/jpeg';
+                        if (quoted.videoMessage) mimeType = quoted.videoMessage.mimetype || 'video/mp4';
+                    } catch (e) {
+                        log('❌ Erro ao baixar imagem citada:', e.message);
+                    }
+                }
+            }
+
+            if (!textToPost && !mediaBuffer) {
+                await sock.sendMessage(chatId, { text: '❌ Conteúdo vazio.\nUse: */x Seu Texto*\nOu envie uma foto com a legenda */x*\nOu responda a uma foto com */x*' });
+                return true;
+            }
+
+            // Enviar para TODOS (Grupos + Twitter ativado)
+            const mediaObj = mediaBuffer ? { buffer: mediaBuffer, mimetype: mimeType } : null;
+
+            await sock.sendMessage(chatId, { text: '📤 Enviando broadcast global (WPP + Telegram + X)...' });
+
+            const result = await sendToAll(textToPost, null, mediaObj, true); // true = USE TWITTER
+
+            await sock.sendMessage(chatId, { text: `✅ ${result.resumo}` });
+            if (result.twitter.success) {
+                await sock.sendMessage(chatId, { text: '✅ Tweet postado!' });
+            } else if (!result.twitter.skipped) {
+                await sock.sendMessage(chatId, { text: `❌ Erro no Twitter: ${result.twitter.error}` });
+            }
+
+            return true;
+        }
+
         return false; // Não era um comando conhecido
     } catch (error) {
         log('❌ Erro ao processar comando:', error.message);
@@ -737,27 +905,15 @@ async function processCommand(msg, senderNumber) {
 async function startWhatsApp() {
     try {
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
+        const { version } = await fetchLatestBaileysVersion();
 
-        // Buscar versão mais recente do WhatsApp Web direto do repositório oficial
-        let version;
-        try {
-            const response = await axios.get(
-                'https://raw.githubusercontent.com/WhiskeySockets/Baileys/master/src/Defaults/baileys-version.json',
-                { timeout: 10000 }
-            );
-            version = response.data.version;
-            log(`� Versão WhatsApp Web (GitHub): ${version.join('.')}`);
-        } catch (e) {
-            version = [2, 3000, 1033105955]; // fallback atualizado
-            log(`⚠️ Falha ao buscar versão do GitHub, usando fallback: ${version.join('.')}`);
-        }
-
-        log('�🚀 Iniciando WhatsApp com Baileys v7...');
-        console.log(`🚀 Iniciando WhatsApp com Baileys v7 (WA Web v${version.join('.')})`);
+        log(`🚀 Iniciando WhatsApp com Baileys v${version.join('.')}`);
+        console.log(`🚀 Iniciando WhatsApp com Baileys v${version.join('.')}`);
 
         sock = makeWASocket({
             version,
             logger,
+            printQRInTerminal: false,
             auth: {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
@@ -911,7 +1067,7 @@ async function startWhatsApp() {
                         log('📥 Processando mídia enviada...');
                         await sock.sendMessage(chatId, { text: '📥 Baixando mídia, aguarde...' });
 
-                        const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+                        const { downloadMediaMessage } = require('@anubis-pro/baileys');
                         const buffer = await downloadMediaMessage(msg, 'buffer', {});
 
                         if (buffer) {
@@ -933,14 +1089,15 @@ async function startWhatsApp() {
                         log('🔗 URL de mídia detectada:', imageUrl);
                     }
 
-                    // Adicionar à fila de envios
+                    // Adicionar à fila de envios (sem Twitter por padrão)
                     if (content || media || imageUrl) {
                         const queueInfo = addToQueue({
                             content: content || '📣 Nova mensagem do admin!',
                             imageUrl,
                             media,
                             chatId,
-                            senderNumber
+                            senderNumber,
+                            useTwitter: false // padrão: não postar no Twitter
                         });
 
                         if (queueInfo.position === 1 && !isProcessingQueue) {
@@ -1063,7 +1220,7 @@ app.get('/status', (req, res) => {
             connected: isConnected,
             groups: wppGroups.length,
             user: sock?.user || null,
-            library: 'Baileys (@whiskeysockets/baileys)'
+            library: 'Baileys (@anubis-pro/baileys)'
         },
         telegram: {
             active: !!telegramBot,
@@ -1121,7 +1278,7 @@ process.on('unhandledRejection', (reason) => {
 // === INICIALIZAR BOT ===
 console.log('🤖 Iniciando Bot de Broadcast (Baileys)...');
 console.log('📝 Logs salvos em:', LOG_FILE);
-console.log('📦 Usando biblioteca: @whiskeysockets/baileys (oficial)');
+console.log('📦 Usando biblioteca: @anubis-pro/baileys');
 console.log('-'.repeat(60));
 
 log('🤖 Bot iniciado com Baileys');

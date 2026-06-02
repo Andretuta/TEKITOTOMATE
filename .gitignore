@@ -1,14 +1,30 @@
 # Arquivos de dependências
 node_modules
 
-# Arquivos de sessão do whatsapp-web.js
+# Arquivos de sessão do WhatsApp
 # Contém dados sensíveis de autenticação! NUNCA envie para o GitHub.
 .wwebjs_auth/
+session_baileys/
 
-# Arquivos de log e banco de dados
-*.log
+# Arquivos de configuração SENSÍVEIS
+.env
+bot_admins.json
+telegram_chats.json
+
+# Arquivos de banco de dados
 groups.json
+
+# Arquivos de log
+*.log
+logs/
+
+# Diretório temporário (mídias)
+temp/
 
 # Arquivos de sistema operacional
 .DS_Store
 Thumbs.db
+cookies.json
+
+# Arquivos de configuração com chaves de API
+.roo/mcp.json

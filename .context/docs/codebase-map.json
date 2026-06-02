@@ -1,0 +1,172 @@
+{
+  "version": "1.0.0",
+  "generated": "2026-02-02T13:32:35.179Z",
+  "stack": {
+    "primaryLanguage": "javascript",
+    "languages": [
+      "javascript"
+    ],
+    "frameworks": [],
+    "buildTools": [],
+    "testFrameworks": [],
+    "packageManager": "npm",
+    "isMonorepo": false,
+    "hasDocker": false,
+    "hasCI": false
+  },
+  "structure": {
+    "totalFiles": 10,
+    "topDirectories": [
+      {
+        "name": "bot_admins.json",
+        "fileCount": 1
+      },
+      {
+        "name": "bot.js",
+        "fileCount": 1
+      },
+      {
+        "name": "groups.json",
+        "fileCount": 1
+      },
+      {
+        "name": "logs",
+        "fileCount": 3
+      },
+      {
+        "name": "package-lock.json",
+        "fileCount": 1
+      },
+      {
+        "name": "package.json",
+        "fileCount": 1
+      },
+      {
+        "name": "session_baileys",
+        "fileCount": 0
+      },
+      {
+        "name": "telegram_chats.json",
+        "fileCount": 1
+      },
+      {
+        "name": "update.bat",
+        "fileCount": 1
+      }
+    ],
+    "languageDistribution": [
+      {
+        "extension": ".json",
+        "count": 5
+      },
+      {
+        "extension": ".js",
+        "count": 2
+      },
+      {
+        "extension": ".bat",
+        "count": 1
+      },
+      {
+        "extension": ".log",
+        "count": 1
+      },
+      {
+        "extension": ".txt",
+        "count": 1
+      }
+    ]
+  },
+  "architecture": {
+    "layers": [],
+    "patterns": [],
+    "entryPoints": []
+  },
+  "symbols": {
+    "classes": [],
+    "interfaces": [],
+    "functions": [
+      {
+        "name": "clearSession",
+        "kind": "function",
+        "file": "logs\\bot.js",
+        "line": 61,
+        "exported": false
+      },
+      {
+        "name": "getMediaFromUrl",
+        "kind": "function",
+        "file": "bot.js",
+        "line": 147,
+        "exported": false
+      },
+      {
+        "name": "getMediaFromUrl",
+        "kind": "function",
+        "file": "logs\\bot.js",
+        "line": 213,
+        "exported": false
+      },
+      {
+        "name": "initializeWhatsApp",
+        "kind": "function",
+        "file": "logs\\bot.js",
+        "line": 537,
+        "exported": false
+      },
+      {
+        "name": "processCommand",
+        "kind": "function",
+        "file": "bot.js",
+        "line": 349,
+        "exported": false
+      },
+      {
+        "name": "sendInBatches",
+        "kind": "function",
+        "file": "bot.js",
+        "line": 169,
+        "exported": false
+      },
+      {
+        "name": "sendToAll",
+        "kind": "function",
+        "file": "bot.js",
+        "line": 264,
+        "exported": false
+      },
+      {
+        "name": "sendToAll",
+        "kind": "function",
+        "file": "logs\\bot.js",
+        "line": 235,
+        "exported": false
+      },
+      {
+        "name": "startWhatsApp",
+        "kind": "function",
+        "file": "bot.js",
+        "line": 475,
+        "exported": false
+      },
+      {
+        "name": "syncGroups",
+        "kind": "function",
+        "file": "bot.js",
+        "line": 214,
+        "exported": false
+      }
+    ],
+    "types": [],
+    "enums": []
+  },
+  "publicAPI": [],
+  "dependencies": {
+    "mostImported": []
+  },
+  "stats": {
+    "totalSymbols": 10,
+    "exportedSymbols": 0,
+    "analysisTimeMs": 108
+  }
+}
