@@ -8,15 +8,14 @@ const qrcode = require('qrcode');
 const TelegramBot = require('node-telegram-bot-api');
 const { exec } = require('child_process');
 
-// Baileys - usando @anubis-pro/baileys (fork sem autofollow)
+// Baileys - usando @whiskeysockets/baileys (oficial)
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
-    fetchLatestBaileysVersion,
     makeCacheableSignalKeyStore,
     Browsers
-} = require('@anubis-pro/baileys');
+} = require('@whiskeysockets/baileys');
 
 // === CONFIGURAÇÕES E CAMINHOS ===
 const LOG_FILE = path.join(__dirname, 'logs', 'bot.log');
@@ -98,11 +97,11 @@ const delayWithJitter = (baseMs) => {
     return delay(baseMs + jitter);
 };
 
-// === CONFIGURAÇÕES DE ENVIO (ANTI-BAN) ===
+// === CONFIGURAÇÕES DE ENVIO (TEMPO TOTAL ~40s) ===
 const PARALLEL_CONFIG = {
     whatsapp: {
-        batchSize: 1,          // 1 mensagem por vez (anti-spam)
-        batchDelay: 5000,      // 5 segundos entre cada envio (otimizado)
+        batchSize: 1,          // 1 mensagem por vez
+        batchDelay: 2000,      // 2 segundos entre cada envio (ajustado para 40s total)
         maxRetries: 1          // Sem retry excessivo
     },
     telegram: {
@@ -112,14 +111,15 @@ const PARALLEL_CONFIG = {
     }
 };
 
-// === CONTROLE DE TAXA DE BROADCAST ===
+// === CONTROLE DE TAXA DE BROADCAST (AGORA NÃO TRAVA - APENAS AVISA) ===
 const RATE_LIMIT = {
-    maxBroadcastsPerHour: 8,  // 8 broadcasts por hora (otimizado)
+    maxBroadcastsPerHour: 8,  // 8 broadcasts por hora (referência)
     broadcastHistory: [],     // timestamps dos últimos broadcasts
-    cooldownMs: 120000        // 2 minutos mínimo entre broadcasts (otimizado)
+    cooldownMs: 120000        // 2 minutos mínimo entre broadcasts (referência)
 };
 
-function canBroadcast() {
+// Verifica rate limit mas NUNCA bloqueia - apenas retorna se está acima do limite
+function checkRateLimit() {
     const now = Date.now();
     const oneHourAgo = now - 3600000;
 
@@ -128,25 +128,75 @@ function canBroadcast() {
 
     // Verificar limite por hora
     if (RATE_LIMIT.broadcastHistory.length >= RATE_LIMIT.maxBroadcastsPerHour) {
-        const nextAvailable = RATE_LIMIT.broadcastHistory[0] + 3600000;
-        const waitMinutes = Math.ceil((nextAvailable - now) / 60000);
-        log(`⚠️ Rate limit atingido! Máximo ${RATE_LIMIT.maxBroadcastsPerHour} broadcasts/hora. Próximo disponível em ${waitMinutes} min.`);
-        return { allowed: false, waitMinutes };
+        return { exceeded: true, reason: 'hora', count: RATE_LIMIT.broadcastHistory.length };
     }
 
     // Verificar cooldown mínimo entre broadcasts
     const lastBroadcast = RATE_LIMIT.broadcastHistory[RATE_LIMIT.broadcastHistory.length - 1];
     if (lastBroadcast && (now - lastBroadcast) < RATE_LIMIT.cooldownMs) {
         const waitSeconds = Math.ceil((RATE_LIMIT.cooldownMs - (now - lastBroadcast)) / 1000);
-        log(`⚠️ Cooldown ativo! Aguarde ${waitSeconds}s entre broadcasts.`);
-        return { allowed: false, waitSeconds };
+        return { exceeded: true, reason: 'cooldown', waitSeconds };
     }
 
-    return { allowed: true };
+    return { exceeded: false };
 }
 
 function registerBroadcast() {
     RATE_LIMIT.broadcastHistory.push(Date.now());
+}
+
+// === MENSAGEM GIGANTE DE AVISO DE RATE LIMIT ===
+function getRateLimitWarningMessage() {
+    return `⚠️🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨⚠️
+
+⛔⛔⛔ *RATE LIMIT ATINGIDO* ⛔⛔⛔
+
+🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴
+
+*ATENÇÃO CARALHO!!!*
+
+O RATE LIMIT FOI ATINGIDO!!! 
+
+SE CONTINUAR VOCÊ TOMA NO CU SEU CAOLHO DA PICA TORTA VAI PERDER O CHIP FDP!!!
+
+🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴
+
+O envio VAI continuar mas é POR SUA CONTA E RISCO!!!
+O WhatsApp pode BANIR seu número a qualquer momento!!!
+
+⚠️ VOCÊ FOI AVISADO SEU ARROMBADO ⚠️
+
+🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨`;
+}
+
+function printRateLimitWarningCMD() {
+    const separator = '!'.repeat(80);
+    const warning = `
+${separator}
+${separator}
+${'!'.repeat(20)}  RATE LIMIT ATINGIDO  ${'!'.repeat(20)}
+${separator}
+${separator}
+
+    ██████╗  █████╗ ████████╗███████╗    ██╗     ██╗███╗   ███╗██╗████████╗
+    ██╔══██╗██╔══██╗╚══██╔══╝██╔════╝    ██║     ██║████╗ ████║██║╚══██╔══╝
+    ██████╔╝███████║   ██║   █████╗      ██║     ██║██╔████╔██║██║   ██║   
+    ██╔══██╗██╔══██║   ██║   ██╔══╝      ██║     ██║██║╚██╔╝██║██║   ██║   
+    ██║  ██║██║  ██║   ██║   ███████╗    ███████╗██║██║ ╚═╝ ██║██║   ██║   
+    ╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝    ╚══════╝╚═╝╚═╝     ╚═╝╚═╝   ╚═╝   
+
+${separator}
+    ⚠️⚠️⚠️  RATE LIMIT FOI ATINGIDO!!! CONTINUANDO POR CONTA E RISCO!!!  ⚠️⚠️⚠️
+    
+    SE CONTINUAR VOCÊ TOMA NO CU SEU CAOLHO DA PICA TORTA 
+    VAI PERDER O CHIP FDP!!!
+    
+    O ENVIO VAI CONTINUAR MAS O WHATSAPP PODE BANIR A QUALQUER MOMENTO!!!
+${separator}
+${separator}
+${separator}
+`;
+    console.log(warning);
 }
 
 // === CONTROLE DE GRUPOS MORTOS (auto-limpeza) ===
@@ -212,26 +262,25 @@ async function processQueue() {
         
         log(`📤 Fila: processando job (restam ${broadcastQueue.length} na fila)`);
         
-        // Aguardar cooldown do rate limit antes de enviar
-        let rateCheck = canBroadcast();
-        if (!rateCheck.allowed) {
-            const waitMs = rateCheck.waitMinutes
-                ? rateCheck.waitMinutes * 60 * 1000
-                : (rateCheck.waitSeconds || 60) * 1000;
-            const waitDisplay = rateCheck.waitMinutes
-                ? `${rateCheck.waitMinutes} minuto(s)`
-                : `${rateCheck.waitSeconds || 60} segundo(s)`;
+        // Verificar rate limit - NÃO BLOQUEIA, apenas avisa
+        let rateCheck = checkRateLimit();
+        if (rateCheck.exceeded) {
+            // AVISO GIGANTE NO CMD
+            printRateLimitWarningCMD();
+            log('🚨🚨🚨 RATE LIMIT ATINGIDO - CONTINUANDO POR CONTA E RISCO!!! 🚨🚨🚨');
             
-            log(`⏳ Fila: cooldown ativo, aguardando ${waitDisplay} antes do próximo envio...`);
-            
+            // AVISO NO CHAT DO WHATSAPP (no chat do admin, não no broadcast)
             if (sock && isConnected && job.chatId) {
-                await sock.sendMessage(job.chatId, {
-                    text: `⏳ Cooldown anti-ban ativo. Próximo envio em ${waitDisplay}...\n📋 ${broadcastQueue.length} envio(s) na fila.`
-                });
+                try {
+                    await sock.sendMessage(job.chatId, {
+                        text: getRateLimitWarningMessage()
+                    });
+                } catch (e) {
+                    log('❌ Erro ao enviar aviso de rate limit:', e.message);
+                }
             }
             
-            await delay(waitMs + 2000); // +2s de margem
-            continue; // Verificar novamente o rate limit
+            // NÃO ESPERA - CONTINUA ENVIANDO
         }
         
         try {
@@ -240,20 +289,13 @@ async function processQueue() {
                 const remainingMsg = broadcastQueue.length > 1
                     ? `\n📋 Restam ${broadcastQueue.length - 1} na fila depois desta.`
                     : '';
+                const rateLimitTag = rateCheck.exceeded ? '\n🚨 *RATE LIMIT ATINGIDO - ENVIANDO POR SUA CONTA E RISCO!*' : '';
                 await sock.sendMessage(job.chatId, {
-                    text: `📤 Iniciando envio...${remainingMsg}`
+                    text: `📤 Iniciando envio...${remainingMsg}${rateLimitTag}`
                 });
             }
             
-            const resultado = await sendToAll(job.content, job.imageUrl, job.media, job.useTwitter || false);
-            
-            // Se ainda assim deu rate limit (caso raro), recolocar na espera
-            if (resultado.rateLimited) {
-                log('⚠️ Fila: rate limit inesperado, reagendando...');
-                job.status = 'waiting';
-                await delay(60000);
-                continue;
-            }
+            const resultado = await sendToAll(job.content, job.imageUrl, job.media);
             
             // Notificar admin do resultado
             if (sock && isConnected && job.chatId) {
@@ -263,13 +305,6 @@ async function processQueue() {
                 await sock.sendMessage(job.chatId, {
                     text: `✅ ${resultado.resumo}${nextMsg}`
                 });
-
-                // Notificar sobre Twitter separadamente
-                if (resultado.twitter && resultado.twitter.success) {
-                    await sock.sendMessage(job.chatId, { text: '✅ Tweet postado!' });
-                } else if (resultado.twitter && !resultado.twitter.skipped && resultado.twitter.error) {
-                    await sock.sendMessage(job.chatId, { text: `❌ Erro no Twitter: ${resultado.twitter.error}` });
-                }
             }
             
             log('✅ Fila: job concluído com sucesso');
@@ -285,10 +320,10 @@ async function processQueue() {
         // Remover job processado
         broadcastQueue.shift();
         
-        // Pausa entre jobs da fila para respeitar anti-ban
+        // Pausa entre jobs da fila
         if (broadcastQueue.length > 0) {
-            log(`⏳ Fila: aguardando 8s antes do próximo envio...`);
-            await delay(8000);
+            log(`⏳ Fila: aguardando 5s antes do próximo envio...`);
+            await delay(5000);
         }
     }
     
@@ -369,10 +404,6 @@ if (TELEGRAM_TOKEN) {
     log('⚠️ TELEGRAM_TOKEN não configurado - Telegram desabilitado');
 }
 
-// === CONFIGURAÇÃO DO TWITTER (PYTHON BRIDGE) ===
-// Não requer inicialização de objeto, usa script sob demanda.
-// As credenciais são lidas diretamente pelo Python do arquivo .env
-
 // === FUNÇÕES DE MÍDIA ===
 async function getMediaFromUrl(url) {
     try {
@@ -400,6 +431,16 @@ async function sendInBatches(items, sendFunction, config, platform) {
     const results = { success: 0, failed: 0, errors: [] };
     const totalItems = items.length;
 
+    // Calcular delay dinâmico para atingir ~40s total no WhatsApp
+    let dynamicDelay = config.batchDelay;
+    if (platform === 'WhatsApp' && totalItems > 1) {
+        // 40 segundos totais / número de grupos = delay por grupo
+        // Subtrai 1s por grupo para a simulação de digitação
+        const targetTotalMs = 40000;
+        dynamicDelay = Math.max(500, Math.floor(targetTotalMs / totalItems) - 1000);
+        log(`⏱️ WhatsApp: delay dinâmico calculado = ${dynamicDelay}ms por grupo (${totalItems} grupos, alvo: 40s total)`);
+    }
+
     for (let i = 0; i < totalItems; i += config.batchSize) {
         const batch = items.slice(i, i + config.batchSize);
         const batchNum = Math.floor(i / config.batchSize) + 1;
@@ -412,18 +453,18 @@ async function sendInBatches(items, sendFunction, config, platform) {
 
             for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
                 try {
-                    // ANTI-BAN: Simular digitação antes de enviar (apenas WhatsApp)
+                    // Simular digitação antes de enviar (apenas WhatsApp)
                     if (platform === 'WhatsApp' && sock) {
                         try {
                             await sock.sendPresenceUpdate('composing', itemId);
-                            await delay(800 + Math.random() * 1000); // 0.8-1.8s "digitando" (otimizado)
+                            await delay(500 + Math.random() * 500); // 0.5-1s "digitando"
                             await sock.sendPresenceUpdate('paused', itemId);
                         } catch (e) { /* ignore presence errors */ }
                     }
 
                     await sendFunction(itemId);
                     results.success++;
-                    trackGroupSuccess(itemId); // ANTI-BAN: reset dead counter
+                    trackGroupSuccess(itemId);
                     log(`✅ ${platform} [${results.success + results.failed}/${totalItems}]:`, itemId);
                     return;
                 } catch (error) {
@@ -439,7 +480,7 @@ async function sendInBatches(items, sendFunction, config, platform) {
             results.errors.push({ id: itemId, error: lastError?.message || 'Erro desconhecido' });
             log(`❌ ${platform} Falha após ${config.maxRetries} tentativas:`, itemId, lastError?.message);
 
-            // ANTI-BAN: Rastrear falhas consecutivas de grupos
+            // Rastrear falhas consecutivas de grupos
             if (platform === 'WhatsApp') {
                 trackGroupFailure(itemId);
             }
@@ -448,7 +489,7 @@ async function sendInBatches(items, sendFunction, config, platform) {
         await Promise.all(promises);
 
         if (i + config.batchSize < totalItems) {
-            await delayWithJitter(config.batchDelay); // ANTI-BAN: delay com jitter aleatório
+            await delayWithJitter(dynamicDelay);
         }
     }
 
@@ -580,23 +621,15 @@ async function sendToTwitter(message, media) {
 
 // === FUNÇÃO DE ENVIO PRINCIPAL ===
 async function sendToAll(message, imageUrl = null, directMedia = null, useTwitter = false) {
-    // ANTI-BAN: Verificar rate limit antes de enviar
-    const rateCheck = canBroadcast();
-    if (!rateCheck.allowed) {
-        const waitMsg = rateCheck.waitMinutes
-            ? `⚠️ Rate limit! Máximo ${RATE_LIMIT.maxBroadcastsPerHour} broadcasts/hora. Aguarde ${rateCheck.waitMinutes} minutos.`
-            : `⚠️ Cooldown ativo! Aguarde ${rateCheck.waitSeconds} segundos entre broadcasts.`;
-        return {
-            whatsapp: { sucessos: 0, falhas: 0, erros: [] },
-            telegram: { sucessos: 0, falhas: 0, erros: [] },
-            twitter: { success: false, skipped: true },
-            tempoTotal: '0s',
-            resumo: waitMsg,
-            rateLimited: true
-        };
+    // RATE LIMIT: Verificar mas NÃO BLOQUEAR - apenas avisar
+    const rateCheck = checkRateLimit();
+    if (rateCheck.exceeded) {
+        // AVISO GIGANTE NO CMD
+        printRateLimitWarningCMD();
+        log('🚨🚨🚨 RATE LIMIT ATINGIDO NA FUNÇÃO sendToAll - CONTINUANDO MESMO ASSIM!!! 🚨🚨🚨');
     }
 
-    // Registrar este broadcast
+    // Registrar este broadcast independente do rate limit
     registerBroadcast();
 
     const wppGroups = readJson(WHATSAPP_GROUPS_DB);
@@ -618,14 +651,15 @@ async function sendToAll(message, imageUrl = null, directMedia = null, useTwitte
         wppGroups: wppGroups.length,
         tgChats: tgChats.length,
         whatsappReady: isConnected,
-        twitter: useTwitter
+        twitter: useTwitter,
+        rateLimitExceeded: rateCheck.exceeded
     });
 
     let wppResults = { success: 0, failed: 0, errors: [] };
     let tgResults = { success: 0, failed: 0, errors: [] };
     let twitterResult = { success: false, error: null };
 
-    // Envio para Twitter (em paralelo com o resto)
+    // Envio para Twitter
     const twitterPromise = (async () => {
         if (useTwitter && process.env.TWITTER_USERNAME) {
             log('🐦 Iniciando envio para Twitter...');
@@ -634,11 +668,11 @@ async function sendToAll(message, imageUrl = null, directMedia = null, useTwitte
         return { success: false, skipped: true };
     })();
 
-    // Envios WhatsApp (sequencial com jitter)
+    // Envios WhatsApp (sequencial com jitter, tempo total ~40s)
     if (isConnected && sock && wppGroups.length > 0) {
-        // ANTI-BAN: Embaralhar ordem dos grupos para evitar padrão detectável
+        // Embaralhar ordem dos grupos para evitar padrão detectável
         const shuffledGroups = shuffleArray(wppGroups);
-        log(`📱 Iniciando envio WhatsApp para ${shuffledGroups.length} grupos (ordem aleatória)...`);
+        log(`📱 Iniciando envio WhatsApp para ${shuffledGroups.length} grupos (ordem aleatória, alvo: ~40s total)...`);
 
         wppResults = await sendInBatches(
             shuffledGroups,
@@ -692,7 +726,8 @@ async function sendToAll(message, imageUrl = null, directMedia = null, useTwitte
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    const resumo = `📊 Envio concluído em ${elapsed}s: WPP(${wppResults.success}✅/${wppResults.failed}❌) TG(${tgResults.success}✅/${tgResults.failed}❌)`;
+    const rateLimitTag = rateCheck.exceeded ? ' ⚠️[RATE LIMIT EXCEDIDO]' : '';
+    const resumo = `📊 Envio concluído em ${elapsed}s: WPP(${wppResults.success}✅/${wppResults.failed}❌) TG(${tgResults.success}✅/${tgResults.failed}❌)${rateLimitTag}`;
     log(resumo);
 
     return {
@@ -700,7 +735,8 @@ async function sendToAll(message, imageUrl = null, directMedia = null, useTwitte
         telegram: { sucessos: tgResults.success, falhas: tgResults.failed, erros: tgResults.errors },
         twitter: twitterResult,
         tempoTotal: elapsed + 's',
-        resumo
+        resumo,
+        rateLimitExceeded: rateCheck.exceeded
     };
 }
 
@@ -721,6 +757,11 @@ async function processCommand(msg, senderNumber) {
             const isWppReady = isConnected ? '✅ Conectado' : '❌ Desconectado';
             const isTgReady = telegramBot ? '✅ Ativo' : '❌ Inativo';
 
+            const rateCheck = checkRateLimit();
+            const rateLimitStatus = rateCheck.exceeded 
+                ? '🚨 EXCEDIDO (enviando por conta e risco!)' 
+                : `✅ OK (${RATE_LIMIT.broadcastHistory.length}/${RATE_LIMIT.maxBroadcastsPerHour})`;
+
             const statusMsg =
                 `📊 *STATUS DO BOT*\n\n` +
                 `🔸 WhatsApp: ${isWppReady}\n` +
@@ -730,9 +771,10 @@ async function processCommand(msg, senderNumber) {
                 `🔸 Twitter: ${process.env.TWITTER_USERNAME ? '✅ Configurado' : '❌ Não configurado'}\n` +
                 `🔸 Uptime: ${Math.floor(process.uptime() / 60)}min\n` +
                 `🔸 Memória: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB\n` +
-                `🔸 Biblioteca: Baileys (@anubis-pro/baileys)\n` +
-                `🔸 Rate Limit: ${RATE_LIMIT.broadcastHistory.length}/${RATE_LIMIT.maxBroadcastsPerHour} broadcasts/hora\n` +
-                `🔸 Grupos c/ falha: ${DEAD_GROUPS.size}`;
+                `🔸 Biblioteca: Baileys\n` +
+                `🔸 Rate Limit: ${rateLimitStatus}\n` +
+                `🔸 Grupos c/ falha: ${DEAD_GROUPS.size}\n` +
+                `🔸 Tempo de envio: ~40s total`;
 
             await sock.sendMessage(chatId, { text: statusMsg });
             return true;
@@ -783,7 +825,9 @@ async function processCommand(msg, senderNumber) {
                 `• Digite a mensagem normalmente\n` +
                 `• Envie uma imagem com legenda\n` +
                 `• Envie apenas uma URL de imagem\n\n` +
-                `📋 *Fila:* Envie várias mensagens seguidas!\nElas entram na fila e são enviadas uma após a outra.`;
+                `📋 *Fila:* Envie várias mensagens seguidas!\nElas entram na fila e são enviadas uma após a outra.\n\n` +
+                `⏱️ *Tempo de envio:* ~40 segundos total\n` +
+                `⚠️ *Rate Limit:* O bot NÃO trava mais, apenas avisa!`;
 
             await sock.sendMessage(chatId, { text: helpMsg });
             return true;
@@ -833,9 +877,8 @@ async function processCommand(msg, senderNumber) {
         }
 
         // === COMANDO X (TWITTER ONLY) ===
-        // Aceita: /x Texto, /X Texto, ou Legenda em foto: /x Texto
         if (comando.startsWith('/x')) {
-            const { downloadMediaMessage } = require('@anubis-pro/baileys');
+            const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 
             // Extrair texto (remove o /x e espaços iniciais)
             let textToPost = messageText.slice(2).trim();
@@ -905,15 +948,27 @@ async function processCommand(msg, senderNumber) {
 async function startWhatsApp() {
     try {
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-        const { version } = await fetchLatestBaileysVersion();
 
-        log(`🚀 Iniciando WhatsApp com Baileys v${version.join('.')}`);
-        console.log(`🚀 Iniciando WhatsApp com Baileys v${version.join('.')}`);
+        // Buscar versão mais recente do WhatsApp Web direto do repositório oficial
+        let version;
+        try {
+            const response = await axios.get(
+                'https://raw.githubusercontent.com/WhiskeySockets/Baileys/master/src/Defaults/baileys-version.json',
+                { timeout: 10000 }
+            );
+            version = response.data.version;
+            log(`📱 Versão WhatsApp Web (GitHub): ${version.join('.')}`);
+        } catch (e) {
+            version = [2, 3000, 1033105955]; // fallback atualizado
+            log(`⚠️ Falha ao buscar versão do GitHub, usando fallback: ${version.join('.')}`);
+        }
+
+        log('🚀 Iniciando WhatsApp com Baileys v7...');
+        console.log(`🚀 Iniciando WhatsApp com Baileys v7 (WA Web v${version.join('.')})`);
 
         sock = makeWASocket({
             version,
             logger,
-            printQRInTerminal: false,
             auth: {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
@@ -921,7 +976,7 @@ async function startWhatsApp() {
             browser: Browsers.macOS('Chrome'),
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
-            markOnlineOnConnect: false, // ANTI-BAN: não marcar online automaticamente
+            markOnlineOnConnect: false,
         });
 
         // Salvar credenciais
@@ -953,6 +1008,8 @@ async function startWhatsApp() {
                 console.log(`📱 Conectado como: ${user?.name || 'N/A'}`);
                 console.log(`📞 Número: ${user?.id?.split(':')[0] || 'N/A'}`);
                 console.log(`🤖 Bot operacional às ${new Date().toLocaleTimeString()}`);
+                console.log(`⏱️ Tempo de envio configurado: ~40 segundos total`);
+                console.log(`⚠️ Rate Limit: NÃO trava - apenas avisa e continua`);
 
                 // Sincronizar grupos existentes ao conectar (com delay maior)
                 console.log('🔄 Sincronizando grupos existentes...');
@@ -980,7 +1037,7 @@ async function startWhatsApp() {
                 console.log('   Stack:', lastDisconnect?.error?.stack);
                 log('❌ WhatsApp desconectado:', lastDisconnect?.error?.message || 'Motivo desconhecido', '| StatusCode:', statusCode);
 
-                // ANTI-BAN: StatusCode 403 = conta bloqueada/restringida
+                // StatusCode 403 = conta bloqueada/restringida
                 if (statusCode === 403) {
                     reconnectAttempts++;
                     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
@@ -1067,7 +1124,7 @@ async function startWhatsApp() {
                         log('📥 Processando mídia enviada...');
                         await sock.sendMessage(chatId, { text: '📥 Baixando mídia, aguarde...' });
 
-                        const { downloadMediaMessage } = require('@anubis-pro/baileys');
+                        const { downloadMediaMessage } = require('@whiskeysockets/baileys');
                         const buffer = await downloadMediaMessage(msg, 'buffer', {});
 
                         if (buffer) {
@@ -1089,15 +1146,14 @@ async function startWhatsApp() {
                         log('🔗 URL de mídia detectada:', imageUrl);
                     }
 
-                    // Adicionar à fila de envios (sem Twitter por padrão)
+                    // Adicionar à fila de envios
                     if (content || media || imageUrl) {
                         const queueInfo = addToQueue({
                             content: content || '📣 Nova mensagem do admin!',
                             imageUrl,
                             media,
                             chatId,
-                            senderNumber,
-                            useTwitter: false // padrão: não postar no Twitter
+                            senderNumber
                         });
 
                         if (queueInfo.position === 1 && !isProcessingQueue) {
@@ -1185,19 +1241,12 @@ app.post('/send-to-all', async (req, res) => {
 
         const resultado = await sendToAll(message || '', imageUrl);
 
-        // ANTI-BAN: Se rate limited, retornar 429
-        if (resultado.rateLimited) {
-            return res.status(429).json({
-                success: false,
-                error: resultado.resumo,
-                rateLimited: true
-            });
-        }
-
+        // Se rate limit excedido, avisar mas NÃO bloquear (status 200 com warning)
         res.json({
             success: true,
             message: 'Enviado com sucesso.',
-            resultado: resultado
+            resultado: resultado,
+            rateLimitWarning: resultado.rateLimitExceeded ? 'RATE LIMIT EXCEDIDO - Envio realizado por conta e risco!' : null
         });
 
     } catch (error) {
@@ -1214,18 +1263,26 @@ app.post('/send-to-all', async (req, res) => {
 app.get('/status', (req, res) => {
     const wppGroups = readJson(WHATSAPP_GROUPS_DB);
     const tgChats = readJson(TELEGRAM_CHATS_DB);
+    const rateCheck = checkRateLimit();
 
     res.json({
         whatsapp: {
             connected: isConnected,
             groups: wppGroups.length,
             user: sock?.user || null,
-            library: 'Baileys (@anubis-pro/baileys)'
+            library: 'Baileys (@whiskeysockets/baileys)'
         },
         telegram: {
             active: !!telegramBot,
             chats: tgChats.length
         },
+        rateLimit: {
+            exceeded: rateCheck.exceeded,
+            broadcastsThisHour: RATE_LIMIT.broadcastHistory.length,
+            maxPerHour: RATE_LIMIT.maxBroadcastsPerHour,
+            note: 'Rate limit NÃO bloqueia envios - apenas avisa'
+        },
+        sendTime: '~40 segundos total',
         uptime: process.uptime(),
         memory: process.memoryUsage()
     });
@@ -1278,7 +1335,9 @@ process.on('unhandledRejection', (reason) => {
 // === INICIALIZAR BOT ===
 console.log('🤖 Iniciando Bot de Broadcast (Baileys)...');
 console.log('📝 Logs salvos em:', LOG_FILE);
-console.log('📦 Usando biblioteca: @anubis-pro/baileys');
+console.log('📦 Usando biblioteca: @whiskeysockets/baileys (oficial)');
+console.log('⏱️ Tempo de envio: ~40 segundos total');
+console.log('⚠️ Rate Limit: NÃO trava - continua e avisa com mensagem GIGANTE');
 console.log('-'.repeat(60));
 
 log('🤖 Bot iniciado com Baileys');
