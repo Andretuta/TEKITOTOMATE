@@ -1,472 +1,311 @@
 # 🤖 Guia do Usuário - Bot de Broadcast Multiplataforma
 
-## 📋 Índice
-- [Visão Geral](#visão-geral)
-- [Comandos do WhatsApp](#comandos-do-whatsapp)
-- [Funcionalidades de Broadcast](#funcionalidades-de-broadcast)
-- [API REST](#api-rest)
-- [Configuração](#configuração)
-- [Solução de Problemas](#solução-de-problemas)
+Este bot foi projetado para realizar transmissões simultâneas de mensagens (textos, links e mídias) para múltiplos destinos, integrando WhatsApp, Telegram e Twitter/X de forma eficiente, segura e automatizada.
 
 ---
 
-## 🎯 Visão Geral
+## 📋 Índice
+- [Visão Geral e Arquitetura](#-visão-geral-e-arquitetura)
+  - [O que faz cada arquivo na pasta src](#o-que-faz-cada-arquivo-na-pasta-src)
+- [Instalação e Inicialização](#-instalação-e-inicialização)
+- [Configuração de Arquivos](#%EF%B8%F0-configuração-de-arquivos)
+- [Comandos do WhatsApp](#-comandos-do-whatsapp)
+- [Modos de Velocidade (Rápido vs Lento)](#%EF%B8%8F-modos-de-velocidade-rápido-vs-lento)
+- [Controle de Rate Limit (Limite de Taxa)](#-controle-de-rate-limit-limite-de-taxa)
+- [Armazenamento de Mídia e Fila Persistente](#-armazenamento-de-mídia-e-fila-persistente)
+- [Segurança e Prevenção de Ban (Anti-Ban)](#-segurança-e-prevenção-de-ban-anti-ban)
+- [Solução de Problemas (FAQ & Workarounds)](#-solução-de-problemas-faq--workarounds)
 
-Este bot permite enviar mensagens simultaneamente para múltiplas plataformas:
-- 📱 **WhatsApp** - Grupos onde o bot participa
-- 📨 **Telegram** - Canais e grupos cadastrados
-- 🐦 **Twitter/X** - Postagens na sua timeline
+---
+
+## 🎯 Visão Geral e Arquitetura
+
+O bot permite centralizar suas comunicações enviando uma única mensagem no privado para:
+- 📱 **WhatsApp** - Envio para múltiplos grupos cadastrados.
+- 📨 **Telegram** - Canais e grupos onde o bot está adicionado.
+- 🐦 **Twitter/X** - Postagem direta em sua conta através de automação Puppeteer.
+
+O projeto foi totalmente modularizado para melhorar a organização, escalabilidade e manutenção do código. Abaixo está a explicação detalhada de cada parte do sistema.
+
+### O que faz cada arquivo na pasta `src/`
+
+#### 1. [bot.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/bot.js) (Raiz)
+É o ponto de entrada principal (Orquestrador) do sistema.
+- **Função:** Lê as variáveis de ambiente, cria os diretórios de sessão e logs se necessário, e inicializa o servidor da API Express.
+- **WhatsApp:** Estabelece a conexão socket com o WhatsApp usando a biblioteca oficial `@whiskeysockets/baileys`. Gerencia o ciclo de vida da conexão, escuta eventos de recebimento de mensagens e mídias, gerencia novos grupos em que o bot é inserido e executa a geração de QR Code no terminal.
+- **Telegram:** Inicializa o polling do Telegram e gerencia o registro automático de novos chats.
+- **Resiliência:** Trata erros globais (`uncaughtException` e `unhandledRejection`) e implementa o algoritmo de reconexão gradual.
+
+#### 2. [src/config.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/src/config.js)
+Repositório central de definições e parâmetros globais de funcionamento.
+- **Função:** Armazena caminhos físicos de bancos de dados JSON (`groups.json`, `telegram_chats.json`, `bot_admins.json`, etc.) e do diretório de sessão.
+- **Perfis de Velocidade:** Define as tabelas de tempos de delay, digitação simulada e atraso na fila de envios para os modos `rapido` e `lento`.
+- **Configurações de Concurência:** Define os limites de lotes e retentativas para o Telegram.
+- **Regras de Rate Limit:** Contém as regras de limite por hora (8 broadcasts/hora) e do intervalo mínimo (120 segundos de cooldown), monitorando o histórico de envios ativos.
+
+#### 3. [src/utils.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/src/utils.js)
+Ferramentas e funções auxiliares genéricas reutilizadas por múltiplos arquivos.
+- **Logger com Rotação:** Escreve registros detalhados em `logs/bot.log`. Se o arquivo de log passar de 5MB, ele é renomeado automaticamente para uma versão antiga e os arquivos mais velhos (mantendo apenas os dois últimos) são excluídos.
+- **Leitor/Escritor JSON:** Funções para carregar e salvar dados locais sem travar a execução síncrona.
+- **Delays com Jitter:** Controla as pausas necessárias no código, adicionando opcionalmente uma variação aleatória de até 50% no tempo para simular comportamento humano.
+- **Filtro de Grupos Mortos:** Rastreia falhas consecutivas de envio para grupos de WhatsApp. Se um grupo falhar 5 vezes seguidas (ex: se o bot foi expulso ou o grupo foi deletado), ele é excluído automaticamente de `groups.json`.
+- **Embaralhador (Shuffle):** Função para embaralhar aleatoriamente a ordem de envio dos grupos de WhatsApp a cada transmissão.
+
+#### 4. [src/rateLimit.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/src/rateLimit.js)
+Contém exclusivamente os modelos de avisos de alta visibilidade.
+- **Mensagem do WhatsApp:** Um texto visualmente chamativo com emojis de perigo e um tom informal direto, alertando o administrador que o limite de taxa de envio seguro foi quebrado.
+- **Aviso do Terminal:** Gera um grande banner de caracteres ASCII com a inscrição `RATE LIMIT` e divisores de console destacados, impedindo que o operador do bot ignore o estouro da cota.
+
+#### 5. [src/queue.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/src/queue.js)
+Implementa e gerencia a fila sequencial de broadcasts com persistência física.
+- **Função:** Garante que se você enviar várias mensagens rapidamente para o bot, elas não se encavalarão nem serão enviadas simultaneamente (evitando banimento do chip).
+- **Processamento:** Executa uma tarefa por vez. Antes de iniciar, verifica se o Rate Limit foi estourado. Após a conclusão de um envio, aplica a pausa configurada no perfil de velocidade ativo (`queueDelay`) antes do próximo item.
+- **Persistência da Fila:** Salva o status da fila no arquivo `media_cache/queue_state.json`. Em caso de quedas ou reinicialização do bot, os envios pendentes são carregados automaticamente e retomados após uma pausa segura de 5 segundos.
+
+#### 6. [src/sender.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/src/sender.js)
+O motor de processamento e envio de mensagens para as redes com alta resiliência.
+- **Função:** Controla os envios em lotes (`sendInBatches`) com delays variáveis e simulação de status de digitação ativa (`composing`) no WhatsApp.
+- **Mídia:** Carrega arquivos do cache de mídia físico (`media_cache/`). No Telegram, detecta automaticamente arquivos de vídeo e realiza a postagem usando a API nativa de vídeo (`sendVideo`).
+- **Resiliência a Quedas:** Detecta se o socket do WhatsApp caiu e aborta o lote no meio para poupar dados. Distingue erros de conexão reais de falhas internas do grupo, prevenindo que grupos sejam deletados erroneamente por instabilidade de internet.
+- **Integração Twitter/X:** Cria comandos CLI e inicia em segundo plano o navegador headless Puppeteer executando `twitter_browser.js`.
+- **Sincronização:** Implementa a lógica que varre o WhatsApp em busca de grupos onde o bot está presente.
+
+#### 7. [src/commands.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/src/commands.js)
+Interpretador de comandos recebidos no chat privado do WhatsApp.
+- **Função:** Filtra mensagens de texto que correspondam aos comandos cadastrados e executa as ações devidas (ex: checar status, mudar velocidade, iniciar sincronização, resetar, etc.). Apenas administradores autorizados têm suas mensagens processadas por este arquivo.
+
+#### 8. [src/api.js](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/src/api.js)
+Exposição de recursos do bot para sistemas externos.
+- **Função:** Configura rotas no Express.js que permitem a automações ou painéis web enviar mensagens de broadcast (`POST /send-to-all`), ler as estatísticas de uso em JSON (`GET /status`), e realizar checagens de saúde da aplicação (`GET /health`).
+
+---
+
+## 🚀 Instalação e Inicialização
 
 ### Pré-requisitos
-- Seu número deve estar cadastrado no arquivo `bot_admins.json`
-- O bot deve estar conectado ao WhatsApp
-- Para usar o Twitter, configure as credenciais no arquivo `.env`
+1. Ter o **Node.js** instalado (versão 18 ou superior recomendada).
+2. Ter o **Git** instalado (opcional, para atualizações fáceis).
+
+### Passo a Passo
+1. Abra o terminal na pasta do projeto.
+2. Instale as dependências:
+   ```bash
+   npm install
+   ```
+3. Inicialize o bot:
+   ```bash
+   node bot.js
+   ```
+4. No primeiro início, um **QR Code** será exibido no terminal. Abra o WhatsApp no seu celular, vá em **Aparelhos Conectados** > **Conectar um Aparelho** e escaneie o código.
+
+---
+
+## ⚙️ Configuração de Arquivos
+
+### 1. Arquivo `.env` (Variáveis de Ambiente)
+Crie um arquivo chamado `.env` na pasta raiz do projeto com a seguinte estrutura:
+
+```env
+# Token do bot do Telegram (crie com o @BotFather no Telegram)
+TELEGRAM_TOKEN=123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ
+
+# Credenciais do Twitter/X (Opcional - necessário apenas se for usar o comando /x)
+TWITTER_USERNAME=usuario_twitter
+TWITTER_EMAIL=email_twitter@provedor.com
+TWITTER_PASSWORD=senha_twitter
+
+# Porta onde o servidor da API irá rodar (padrão 3000)
+PORT=3000
+```
+
+### 2. Arquivo `bot_admins.json` (Administradores do Bot)
+Define quais números de WhatsApp podem enviar comandos ou mensagens de broadcast para o bot. O bot aceita tanto o formato de número tradicional quanto o formato **LID** (novo padrão do WhatsApp).
+
+> [!IMPORTANT]
+> Cadastre apenas números contendo DDI (país), DDD e o número de telefone, sem espaços, hifens ou o símbolo de +.
+
+```json
+{
+  "admins": [
+    "5511999998888",
+    "5521977776666"
+  ]
+}
+```
+
+### 3. Banco de Dados Locais (Gerenciados Automaticamente)
+Estes arquivos são atualizados de forma autônoma pelo robô, mas podem ser editados manualmente se o bot estiver desligado:
+- **`groups.json`**: Lista de IDs internos de grupos do WhatsApp (`123456789-98765@g.us`) registrados para receber broadcasts.
+- **`telegram_chats.json`**: Lista de IDs de canais ou grupos do Telegram registrados.
+- **`session_baileys/`**: Pasta que armazena os arquivos de autenticação do WhatsApp Web (criptografia e chaves de sessão).
 
 ---
 
 ## 💬 Comandos do WhatsApp
 
-Todos os comandos devem ser enviados em **conversa privada** com o bot (não em grupos).
+> [!TIP]
+> Todos os comandos listados abaixo funcionam apenas se forem enviados no **chat privado** com o bot. Comandos enviados dentro de grupos são ignorados por questões de segurança.
 
-### 📊 `status`
-Mostra o status atual do bot, incluindo conexões, grupos cadastrados e uso de recursos.
-
-**Exemplo:**
-```
-status
-```
-
-**Resposta:**
-```
-📊 STATUS DO BOT
-
-🔸 WhatsApp: ✅ Conectado
-🔸 Grupos WPP: 12
-🔸 Telegram: ✅ Ativo
-🔸 Chats TG: 3
-🔸 Twitter: ✅ Configurado
-🔸 Uptime: 45min
-🔸 Memória: 85MB
-🔸 Biblioteca: Baileys
-```
+| Comando | Descrição | Exemplo de Uso |
+| :--- | :--- | :--- |
+| **`status`** | Mostra dados operacionais, conexões, estatísticas e o modo de velocidade ativo. | `status` |
+| **`test`** ou **`teste`** | Testa a comunicação e exibe o tempo de resposta do bot em milissegundos. | `test` |
+| **`fila`** ou **`queue`** | Exibe a lista de broadcasts atualmente aguardando envio na fila. | `fila` |
+| **`rapido`** / **`fast`** | Altera a velocidade do bot para o modo rápido (envio em ~40 segundos). | `rapido` |
+| **`meio`** / **`meiotermo`** | Altera a velocidade do bot para o modo médio (envio em ~1 minuto total). 🚨 | `meio` |
+| **`lento`** / **`seguro`** | Altera a velocidade para o modo lento (envio em ~2 minutos). | `lento` |
+| **`sync`** ou **`sincronizar`** | Varre o WhatsApp, localiza todos os grupos participantes e adiciona novos ao banco de dados. | `sync` |
+| **`update`** ou **`atualizar`** | Verifica se existem novos commits e atualizações pendentes no Git. | `update` |
+| **`/x <texto>`** | Envia a mensagem e/ou imagem para WhatsApp, Telegram e publica também no Twitter/X. | `/x Promoção do dia!` |
+| **`reset`** | Deleta a pasta de sessão local e reinicia o robô para forçar uma nova leitura de QR Code. | `reset` |
+| **`help`** ou **`ajuda`** | Exibe uma lista de instruções de ajuda direto no WhatsApp. | `help` |
 
 ---
 
-### 🧪 `test` ou `teste`
-Testa se o bot está funcionando corretamente.
+## ⚡ Modos de Velocidade (Rápido vs Lento)
 
-**Exemplo:**
-```
-test
-```
+Você pode alternar dinamicamente entre duas velocidades de envio do WhatsApp dependendo do teor do seu anúncio e urgência.
 
-**Resposta:**
-```
-🤖 Bot funcionando perfeitamente!
-⏱️ Teste de resposta realizado.
-```
+### Comparativo Técnico de Perfis
 
----
+| Característica | 🚀 Modo Rápido (`rapido`) | ⚖️ Modo Meio Termo (`meio`) | 🐢 Modo Lento (`lento`) |
+| :--- | :--- | :--- | :--- |
+| **Tempo total estimado** | **~40 segundos** (para 13 grupos) | **~1 minuto** (para 13 grupos) | **~2 minutos** (para 13 grupos) |
+| **Delay entre envios** | **Dinâmico** (mínimo de 0.5s) | **Dinâmico** (mínimo de 0.5s) | **Fixo** de 8 segundos |
+| **Simulação de digitação** | Curta e ágil (0.5s) | Moderada (1.0s a 2.0s) | Humana e variada (1.5s a 3.5s) |
+| **Intervalo na fila (Queue)** | 5 segundos | 10 segundos | 15 segundos |
+| **Jitter (Variação aleatória)**| Não aplicável (prioridade tempo de 40s)| Não aplicável (prioridade tempo de 60s)| Ativo (adiciona até +50% de delay aleatório) |
+| **Nível de segurança** | Moderado (focado em velocidade) | Intermediário (⚠️ "PERIGOSO CAOLHO") | Máximo (altamente seguro contra bloqueios) |
 
-### 🔄 `sync` ou `sincronizar`
-Sincroniza todos os grupos do WhatsApp onde o bot participa, adicionando novos grupos automaticamente.
+### Entendendo a Matemática do Modo Rápido e Meio Termo
+No modo rápido e no meio termo, caso você tenha mais de 1 grupo cadastrado, o bot recalcula automaticamente o delay de lote para tentar aproximar o tempo total de transmissão a exatamente **40 segundos** (modo rápido) ou **60 segundos** (modo meio termo), independentemente da quantidade de grupos. A fórmula inteligente utilizada é:
 
-**Exemplo:**
-```
-sync
-```
+$$\text{Delay Dinâmico} = \max\left(500\text{ms},\ \frac{40000\text{ms}}{\text{Total de Grupos}} - \text{Tempo de Digitação}\right)$$
 
-**Resposta:**
-```
-✅ Sincronização concluída!
-
-📊 Grupos encontrados: 15
-➕ Novos adicionados: 2
-📁 Total registrado: 17
-```
+Isso significa que se você tiver 13 grupos, o delay dinâmico de lote se ajustará para aproximadamente **2.5 segundos** por grupo, garantindo rapidez com uma pequena margem de respiro seguro.
 
 ---
 
-### 🔄 `reset`
-Reseta a sessão do WhatsApp e reinicia o bot. Útil quando há problemas de conexão.
+## 🚨 Controle de Rate Limit (Limite de Taxa)
 
-**Exemplo:**
-```
-reset
-```
+Para evitar que a conta do WhatsApp seja classificada como spammer pelos servidores do aplicativo, o sistema implementa políticas estritas de Rate Limit.
 
-**Resposta:**
-```
-🔄 Resetando sessão do WhatsApp...
-O bot será reiniciado.
-```
+- **Limite por Hora:** Máximo de **8 transmissões (broadcasts) completas por hora**.
+- **Cooldown entre Envios:** Intervalo mínimo obrigatório de **120 segundos (2 minutos)** entre o término de um envio e o início do próximo.
 
-⚠️ **Atenção:** Após usar este comando, você precisará escanear o QR Code novamente.
+> [!WARNING]
+> **COMPORTAMENTO DE EXCEÇÃO:** Se os limites descritos forem ultrapassados, **o bot NÃO travará os envios**. Ele continuará a transmissão para garantir a entrega das suas campanhas. 
+> No entanto, ele disparará um **alerta severo de alta visibilidade** no terminal do console (via banner ASCII) e enviará uma mensagem de aviso explícita no WhatsApp do administrador.
+> **O envio prosseguirá por sua inteira conta e risco! O perigo de banimento do chip do WhatsApp é extremamente alto nesses casos.**
 
 ---
 
-### 📦 `update` ou `atualizar`
-Verifica se há atualizações disponíveis no repositório Git.
+## 💾 Armazenamento de Mídia e Fila Persistente
 
-**Exemplo:**
-```
-update
-```
+Para lidar com transmissões massivas de mídias de forma leve e segura, o sistema adota um gerenciamento baseado em disco.
 
-**Resposta (se houver atualização):**
-```
-📦 ATUALIZAÇÃO DISPONÍVEL!
+### 1. Sistema de Cache de Mídias (`media_cache/`)
+Em vez de reter grandes buffers de imagem ou vídeo na memória RAM durante o tempo de espera na fila:
+- **Download Instantâneo:** Ao receber uma imagem ou vídeo para broadcast do administrador, o bot baixa a mídia **no ato** e a salva na pasta física `./media_cache/`.
+- **Nomes com Hash:** Os arquivos são gravados de forma segura usando nomes contendo UUIDs/hashes gerados com a biblioteca `crypto` para evitar sobreposições.
+- **Limpeza de Arquivos Órfãos:** Durante o arranque, o bot executa a função de limpeza interna (`cleanOrphanedCache`), removendo automaticamente qualquer arquivo de cache órfão na pasta `./media_cache/` que não pertença a um trabalho ativo da fila.
 
-Para atualizar, execute no servidor:
-```
-cd d:/TEKITOTOMATE
-git pull origin main
-npm install
-node bot.js
-```
-
-Ou execute: *update.bat*
-```
+### 2. Persistência de Fila em Disco
+Toda a fila de envios pendentes é escrita no arquivo `./media_cache/queue_state.json`.
+- **Resistência a Quedas:** Caso o bot seja desligado, encerre de forma abrupta ou o servidor reinicie, nenhuma mensagem agendada será perdida.
+- **Carregamento Automático:** Ao religar o bot, ele verifica a integridade dos itens na fila salvos no JSON, valida se os arquivos de mídia correspondentes continuam existindo no disco e retoma a rotina de disparos após um atraso seguro de 5 segundos.
+- **Capacidade Ilimitada:** Como as mensagens estão apenas indexadas em formato texto leve na fila do JSON e suas mídias pesadas salvas fisicamente em disco, o bot suporta filas de tamanho virtualmente infinito sem esgotamento de memória.
 
 ---
 
-### 🐦 `/x` - Broadcast com Twitter
-Envia conteúdo para **TODAS as plataformas** (WhatsApp, Telegram E Twitter/X).
+## 🛡️ Segurança e Prevenção de Ban (Anti-Ban)
 
-**Sintaxe:**
-```
-/x Seu texto aqui
-```
+O WhatsApp possui algoritmos robustos de detecção de automação. Este bot implementa várias técnicas para camuflar o disparo e proteger seu chip:
 
-**Com imagem:**
-- Envie uma foto com a legenda `/x` - enviará a foto para todos
-- Envie uma foto com a legenda `/x Seu texto` - enviará foto + texto para todos
-- Responda a uma foto com `/x` - reenviará a foto citada para todos
-
-**Exemplos:**
-```
-/x Nova atualização do projeto disponível!
-```
-
-```
-/x
-(legenda em uma foto)
-```
+1. **Embaralhamento de Grupos:** Antes de cada envio, a lista de grupos cadastrados é embaralhada de forma aleatória. Os envios nunca seguem a mesma sequência, quebrando padrões previsíveis de robôs.
+2. **Simulação Realista de Digitação:** O bot envia o evento `composing` (exibindo a frase *"Digitando..."* no topo do chat do grupo) por alguns segundos antes de efetivamente disparar a mensagem.
+3. **Pausas com Jitter:** Os atrasos contam com um fator de variação aleatório de até 50% para cima. Um delay configurado para 8s pode durar 8.4s, 9.8s ou 11.5s na prática, imitando a irregularidade humana.
+4. **Sem Status Online na Conexão (`markOnlineOnConnect: false`):** O bot não se autodeclara explicitamente "Online" toda vez que se conecta ao socket.
+5. **Autopurga de Grupos Mortos Inteligente:** Tentar enviar repetidamente para grupos de onde o bot foi removido gera erros suspeitos nos servidores do WhatsApp. O bot autodeleta o grupo da lista `groups.json` após 5 falhas consecutivas.
+6. **Detecção e Resiliência de Rede:** Falhas temporárias de conexão (erros como `Connection Closed`, timeout ou `Stream Errored`) **não são** computadas como falhas de grupo. Isso impede o esvaziamento acidental do banco de dados `groups.json` quando houver oscilações ou quedas na internet do servidor.
+7. **Verificação de Saúde da Conexão:** Antes de cada lote de envios no WhatsApp, o bot checa se o socket da conexão ainda está ativo. Caso detecte uma desconexão no meio do broadcast, ele aborta a execução do lote de forma limpa sem perder dados, preservando a fila para envio posterior.
 
 ---
 
-### ❓ `help` ou `ajuda`
-Exibe a lista de comandos disponíveis.
+## 🔧 Solução de Problemas (FAQ & Workarounds)
 
-**Exemplo:**
-```
-help
-```
+Aqui está a lista dos problemas mais comuns que você pode encontrar ao rodar o bot e como resolvê-los de forma prática.
 
----
+### 1. Erro: `Cannot find module ...` ou `MODULE_NOT_FOUND`
+- **Sintoma:** O bot fecha imediatamente após tentar iniciar pelo terminal, exibindo um erro de dependência ausente.
+- **Causa:** O código foi atualizado via git/painel, mas novos pacotes npm foram adicionados à arquitetura e ainda não foram baixados.
+- **Workaround:**
+  1. Feche a janela atual do terminal.
+  2. Abra o terminal na pasta raiz do bot.
+  3. Execute o comando:
+     ```bash
+     npm install
+     ```
+  4. Inicie o bot novamente: `node bot.js`.
 
-## 📤 Funcionalidades de Broadcast
+### 2. Mensagem de erro `403` ou `Conta Restringida` no terminal
+- **Sintoma:** A conexão cai e o terminal exibe o erro status `403` em loop.
+- **Causa:** O número de telefone foi marcado temporariamente pelos servidores do WhatsApp ou sofreu restrições.
+- **Workaround:**
+  - O bot possui um mecanismo automático de **backoff exponencial** para erros 403. Ele tentará reconectar de forma espaçada (dobrando o tempo de espera a cada falha, até o limite de 5 minutos) por até 10 vezes. 
+  - Se a reconexão automática falhar após as 10 tentativas, é muito provável que seu chip tenha sido banido permanentemente. Nesse caso, você precisará limpar a sessão (`reset`) e escanear o QR Code de um novo chip.
 
-### Enviar Mensagem de Texto
+### 3. QR Code não carrega, falha ao escanear ou erros frequentes de criptografia (`Bad MAC` / `Decryption Failed`)
+- **Sintoma:** O terminal gera um QR Code desconfigurado, ou exibe repetidamente erros de descriptografia de mensagens em loop (`Bad MAC`, `Decryption failed` ou similar), impossibilitando o envio.
+- **Causa:** Travamento na sessão local temporária, expiração das chaves de pareamento ou corrupção na criptografia da pasta de autenticação do Baileys.
+- **Workaround:**
+  1. Pressione `Ctrl + C` no terminal para parar a execução do bot.
+  2. Envie o comando `reset` no privado do bot (se ele ainda estiver respondendo).
+  3. Se não responder, delete manualmente a pasta `session_baileys` localizada na raiz do bot.
+  4. Rode o comando `node bot.js` no terminal para iniciar uma sessão totalmente limpa.
+  5. Escaneie o novo QR Code gerado no terminal com o WhatsApp do seu celular.
 
-Basta enviar uma mensagem de texto normal para o bot em conversa privada. A mensagem será enviada para todos os grupos WhatsApp e canais Telegram cadastrados.
+### 4. O bot não responde aos meus comandos no WhatsApp
+- **Sintoma:** Você digita `status` ou `help` e o bot visualiza mas não responde nada.
+- **Causa:** O número de telefone do qual você está enviando os comandos não está cadastrado ou está no formato incorreto em `bot_admins.json`, ou você está tentando enviar em um grupo.
+- **Workaround:**
+  1. Abra o arquivo `bot_admins.json` na pasta do bot.
+  2. Verifique se o seu número está inserido com o DDI (55 para Brasil) e DDD corretos. Exemplo: `"5511999998888"`. Não coloque hifens, parênteses ou o sinal de mais `+`.
+  3. Se seu número foi migrado para o protocolo **LID** pelo WhatsApp, o terminal exibirá a mensagem `⛔ Comando não autorizado de: [número_lid]`. Copie esse ID mostrado no terminal do servidor e adicione-o diretamente à lista de admins em `bot_admins.json`.
+  4. Lembre-se de enviar comandos sempre em **conversa privada** com o bot.
 
-**Exemplo:**
-```
-Olá a todos! Nova atualização disponível no projeto.
-```
+### 5. Falhas ou travamentos ao enviar posts para o Twitter/X
+- **Sintoma:** O envio via `/x` gera erro ou trava no terminal exibindo logs relacionados ao Puppeteer.
+- **Causa:** Credenciais erradas no `.env`, a conta do Twitter ativou autenticação de dois fatores (2FA), ou o navegador oculto foi bloqueado por testes de robôs.
+- **Workaround:**
+  1. Abra o arquivo `.env` e confirme se `TWITTER_USERNAME`, `TWITTER_EMAIL` e `TWITTER_PASSWORD` estão corretos.
+  2. Desative temporariamente a autenticação de dois fatores da sua conta do Twitter, pois o script automatizado não consegue ler códigos SMS ou de aplicativos autenticadores sem interação manual.
+  3. Tente rodar manualmente o teste do Twitter no terminal para ver onde ele falha:
+     ```bash
+     node twitter_browser.js --text "Teste de conexao"
+     ```
 
----
+### 6. Grupos do WhatsApp cadastrados não recebem as mensagens
+- **Sintoma:** O bot envia o broadcast, diz que concluiu com sucesso, mas o conteúdo não aparece em determinados grupos.
+- **Causa:** O bot pode ter sido removido dos grupos ou a lista local `groups.json` está desatualizada.
+- **Workaround:**
+  1. Envie o comando privado `sync` (ou `sincronizar`) para forçar o bot a mapear todos os grupos ativos atuais e salvar no banco de dados.
+  2. Se o bot foi banido de um grupo específico e você não percebeu, o sistema de **Autopurga** removerá o ID desse grupo automaticamente de `groups.json` após 5 tentativas falhas seguidas, garantindo que o bot não trave nos próximos broadcasts.
 
-### Enviar Imagem com Legenda
-
-Envie uma imagem com uma legenda (caption). A imagem e a legenda serão enviadas para todos os destinos.
-
-**Passos:**
-1. Selecione ou tire uma foto
-2. Adicione uma legenda (opcional)
-3. Envie para o bot
-
----
-
-### Enviar URL de Imagem
-
-Envie apenas a URL de uma imagem. O bot baixará e enviará a imagem para todos os destinos.
-
-**Exemplo:**
-```
-https://exemplo.com/imagem.jpg
-```
-
----
-
-### Diferença: Broadcast Normal vs `/x`
-
-| Comando | WhatsApp | Telegram | Twitter |
-|---------|-----------|----------|---------|
-| Mensagem normal | ✅ | ✅ | ❌ |
-| `/x texto` | ✅ | ✅ | ✅ |
-
-**Resumo:**
-- **Mensagem normal:** Envia apenas para WhatsApp e Telegram
-- **`/x`:** Envia para WhatsApp, Telegram E Twitter
-
-Use `/x` quando quiser que o conteúdo seja publicado também no Twitter/X.
-
----
-
-## 🌐 API REST
-
-O bot também expõe uma API REST para integração com outras aplicações.
-
-### Endpoint: Enviar Broadcast
-
-**URL:** `POST http://localhost:3000/send-to-all`
-
-**Headers:**
-```
-Content-Type: application/json
-```
-
-**Body:**
-```json
-{
-  "message": "Mensagem a ser enviada",
-  "imageUrl": "https://exemplo.com/imagem.jpg"
-}
-```
-
-**Resposta de Sucesso:**
-```json
-{
-  "success": true,
-  "message": "Enviado com sucesso.",
-  "resultado": {
-    "whatsapp": {
-      "sucessos": 12,
-      "falhas": 0,
-      "erros": []
-    },
-    "telegram": {
-      "sucessos": 3,
-      "falhas": 0,
-      "erros": []
-    },
-    "twitter": {
-      "success": false,
-      "skipped": true
-    },
-    "tempoTotal": "3.2s",
-    "resumo": "📊 Envio concluído em 3.2s: WPP(12✅/0❌) TG(3✅/0❌)"
-  }
-}
-```
+### 7. O bot do Telegram não envia as mensagens
+- **Sintoma:** O broadcast funciona no WhatsApp, mas não chega nos chats do Telegram.
+- **Causa:** Token do Telegram inválido no `.env`, chat ID não registrado ou bot sem permissões de escrita no canal/grupo do Telegram.
+- **Workaround:**
+  1. Certifique-se de que a variável `TELEGRAM_TOKEN` no `.env` está configurada corretamente.
+  2. Certifique-se de que o bot do Telegram foi adicionado ao canal ou grupo como **Administrador** e que possui permissão para enviar mensagens de texto e mídia.
+  3. Mande qualquer mensagem no privado do bot do Telegram ou adicione-o ao grupo e envie algo para que ele registre o ID do chat automaticamente no banco `telegram_chats.json`.
 
 ---
 
-### Endpoint: Status
+## 📞 Suporte e Documentação Complementar
 
-**URL:** `GET http://localhost:3000/status`
+- **Histórico e Logs:** Verifique logs detalhados de erros em tempo real no arquivo [bot.log](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/logs/bot.log).
+- **Guia do Desenvolvedor:** Consulte o arquivo [AGENTS.md](file:///d:/PROBLEMA/Whatsapp-Telegram-bot/Whatsapp-Telegram-bot/Whatsapp-Telegram-Bot/AGENTS.md) para diretrizes de desenvolvimento, testes Jest e padrões de Pull Request.
 
-**Resposta:**
-```json
-{
-  "whatsapp": {
-    "connected": true,
-    "groups": 12,
-    "user": {
-      "id": "5511999999999:s.whatsapp.net",
-      "name": "Bot"
-    },
-    "library": "Baileys (@anubis-pro/baileys)"
-  },
-  "telegram": {
-    "active": true,
-    "chats": 3
-  },
-  "uptime": 2700.5,
-  "memory": {
-    "rss": 120455168,
-    "heapTotal": 20971520,
-    "heapUsed": 17892344
-  }
-}
-```
-
----
-
-### Endpoint: Health Check
-
-**URL:** `GET http://localhost:3000/health`
-
-**Resposta:**
-```json
-{
-  "status": "OK",
-  "timestamp": "2026-02-07T16:45:00.000Z",
-  "library": "Baileys"
-}
-```
-
----
-
-## ⚙️ Configuração
-
-### Arquivo `.env`
-
-Configure as variáveis de ambiente no arquivo `.env`:
-
-```env
-# Telegram (obtido com @BotFather)
-TELEGRAM_TOKEN=seu_token_aqui
-
-# Twitter (opcional)
-TWITTER_USERNAME=seu_usuario
-TWITTER_EMAIL=seu_email
-TWITTER_PASSWORD=sua_senha
-
-# Porta da API (opcional, padrão: 3000)
-PORT=3000
-```
-
----
-
-### Arquivo `bot_admins.json`
-
-Adicione seu número WhatsApp (apenas números, com código do país e DDD):
-
-```json
-{
-  "admins": [
-    "5511999999999",
-    "5521988888888"
-  ]
-}
-```
-
----
-
-### Arquivo `telegram_chats.json`
-
-Os chats do Telegram são adicionados automaticamente quando o bot é adicionado a um grupo/canal ou recebe uma mensagem.
-
-```json
-[
-  -1001234567890,
-  -1009876543210
-]
-```
-
----
-
-### Arquivo `groups.json`
-
-Os grupos do WhatsApp são gerenciados automaticamente, mas você pode editar manualmente:
-
-```json
-[
-  "5511999999999-1234567890@g.us",
-  "5521988888888-0987654321@g.us"
-]
-```
-
----
-
-## 🔧 Solução de Problemas
-
-### Bot não responde aos comandos
-
-**Possíveis causas:**
-1. Seu número não está em `bot_admins.json`
-2. O bot está desconectado do WhatsApp
-3. Você está enviando comandos de um grupo (deve ser em privado)
-
-**Solução:**
-1. Verifique se seu número está cadastrado como admin
-2. Use o comando `status` para verificar a conexão
-3. Sempre envie comandos em conversa privada com o bot
-
----
-
-### WhatsApp desconectado
-
-**Sintomas:**
-- Bot não envia mensagens
-- Comando `status` mostra "❌ Desconectado"
-
-**Solução:**
-1. Execute o comando `reset` em conversa privada
-2. Escaneie o QR Code que aparecerá no terminal
-3. Aguarde a conexão ser estabelecida
-
----
-
-### Erro ao postar no Twitter
-
-**Possíveis causas:**
-1. Credenciais incorretas no `.env`
-2. Conta suspensa ou com autenticação de 2 fatores
-3. Puppeteer não instalado
-
-**Solução:**
-1. Verifique as credenciais no arquivo `.env`
-2. Desative a autenticação de 2 fatores temporariamente
-3. Execute `npm install` para garantir que todas dependências estão instaladas
-
----
-
-### Grupos não estão recebendo mensagens
-
-**Solução:**
-1. Execute o comando `sync` para sincronizar os grupos
-2. Verifique se o bot ainda participa dos grupos
-3. Use o comando `status` para ver quantos grupos estão cadastrados
-
----
-
-### Telegram não funciona
-
-**Solução:**
-1. Verifique se `TELEGRAM_TOKEN` está configurado no `.env`
-2. Adicione o bot a um grupo/canal
-3. Envie uma mensagem para o bot para registrar o chat automaticamente
-
----
-
-## 📝 Notas Importantes
-
-1. **Autenticação:** Apenas administradores cadastrados podem usar os comandos
-2. **Privacidade:** Comandos só funcionam em conversa privada, não em grupos
-3. **Limites:** O bot usa envio em lotes para evitar bloqueios
-4. **Logs:** Todas as ações são registradas em `logs/bot.log`
-5. **Twitter:** O uso do Twitter é opcional e requer configuração adicional
-
----
-
-## 🚀 Inicialização
-
-Para iniciar o bot:
-
-```bash
-# Instalar dependências (primeira vez)
-npm install
-
-# Iniciar o bot
-node bot.js
-```
-
-No Windows, você também pode usar o arquivo `update.bat` para atualizar e reiniciar.
-
----
-
-## 📞 Suporte
-
-Para mais informações, consulte:
-- `TWITTER_GUIDE.md` - Guia específico do Twitter
-- `AGENTS.md` - Documentação para desenvolvedores
-- Logs em `logs/bot.log`
-
----
-
-**Versão do Bot:** Baseada em @anubis-pro/baileys  
-**Última atualização:** 2026-02-07
+**Versão da Biblioteca:** Baileys Oficial (`@whiskeysockets/baileys`)  
+**Última Atualização:** Junho de 2026

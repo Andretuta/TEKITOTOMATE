@@ -20,6 +20,7 @@ logs/
 
 # Diretório temporário (mídias)
 temp/
+media_cache/
 
 # Arquivos de sistema operacional
 .DS_Store
