@@ -14,9 +14,11 @@ const TelegramBot = require('node-telegram-bot-api');
 // Baileys v7 (ESM) - carregado via import() dinâmico
 const { loadBaileys, getBaileys } = require('./src/baileys-loader');
 
+const util = require('util');
+
 // === MÓDULOS INTERNOS ===
 const { LOG_FILE, SESSION_PATH, WHATSAPP_GROUPS_DB, TELEGRAM_CHATS_DB, MEDIA_CACHE_DIR, MAX_RECONNECT_DELAY, MAX_RECONNECT_ATTEMPTS, getSpeedConfig } = require('./src/config');
-const { log, readJson, writeJson, getAdmins } = require('./src/utils');
+const { log, readJson, writeJson, getAdmins, logToFileOnly } = require('./src/utils');
 const { initSender, updateSenderSocket, syncGroups, sendToAll } = require('./src/sender');
 const { initQueue, updateQueueSocket, addToQueue, isQueueProcessing } = require('./src/queue');
 const { processCommand } = require('./src/commands');
@@ -43,22 +45,29 @@ const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
 
 function isSessionError(args) {
-    const str = args.map(a => typeof a === 'string' ? a : (a?.message || '')).join(' ');
+    const str = util.format(...args);
     return str.includes('Bad MAC') ||
            str.includes('MessageCounterError') ||
-           str.includes('Failed to decrypt message with any known session') ||
-           str.includes('Session error:');
+           str.includes('Failed to decrypt message') ||
+           str.includes('Session error') ||
+           str.includes('losing session:') ||
+           str.includes('Closing session:');
+}
+
+function getSanitizedSummary(str) {
+    if (str.includes('losing session:')) return '🔄 [Baileys] Atualizando chaves da sessão (losing session)...';
+    if (str.includes('Closing session:')) return '🔒 [Baileys] Fechando sessão antiga (Closing session)...';
+    if (str.includes('Bad MAC')) return '⚠️ [Baileys] Erro de descriptografia (Bad MAC) resolvido...';
+    if (str.includes('MessageCounterError')) return '⚠️ [Baileys] Erro de contador (MessageCounterError) resolvido...';
+    if (str.includes('Failed to decrypt message')) return '⚠️ [Baileys] Falha ao descriptografar mensagem (Failed to decrypt)...';
+    return '⚠️ [Baileys] Evento interno de sessão sanitizado...';
 }
 
 console.log = function(...args) {
     if (isSessionError(args)) {
-        sessionErrorCount++;
-        const now = Date.now();
-        if (now - sessionErrorLastLog > SESSION_ERROR_LOG_INTERVAL && sessionErrorCount > 0) {
-            originalConsoleLog(`⚠️ [Sessão] ${sessionErrorCount} erros de descriptografia suprimidos (sessão dessincronizada)`);
-            sessionErrorLastLog = now;
-            sessionErrorCount = 0;
-        }
+        const fullLog = util.format(...args);
+        logToFileOnly('[BAILEYS INTERNO]', fullLog);
+        originalConsoleLog(getSanitizedSummary(fullLog));
         return;
     }
     originalConsoleLog.apply(console, args);
@@ -66,7 +75,9 @@ console.log = function(...args) {
 
 console.error = function(...args) {
     if (isSessionError(args)) {
-        sessionErrorCount++;
+        const fullLog = util.format(...args);
+        logToFileOnly('[BAILEYS ERRO]', fullLog);
+        originalConsoleError(getSanitizedSummary(fullLog));
         return;
     }
     originalConsoleError.apply(console, args);
@@ -487,25 +498,16 @@ function checkSessionHealth() {
 
         // Verificar se creds.json indica problemas
         const credsPath = path.join(SESSION_PATH, 'creds.json');
-        let credsWarning = '';
-        if (fs.existsSync(credsPath)) {
-            const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
-            if (creds.registered === false) {
-                credsWarning = '\n   🔴 ALERTA: registered=false — sessão pode estar inválida!';
-            }
-        }
+        // O campo 'registered' é false para conexões Web/QR Code na v7 (Companion device).
+        // Não é mais um indicativo de problema, então não verificamos mais isso.
 
         console.log(`📋 Saúde da sessão:`);
         console.log(`   📁 ${totalSessions} sessões (${baseSessions} contatos, ${extraVersions} versões extras)`);
         if (largeSessions.length > 0) {
             console.log(`   ⚠️ ${largeSessions.length} sessão(ões) com tamanho anormal (possível corrupção)`);
         }
-        if (credsWarning) {
-            console.log(credsWarning);
-            console.log('   💡 Solução: Apague a pasta session_baileys e escaneie o QR novamente');
-        }
 
-        log(`📋 Saúde sessão: ${totalSessions} sessões, ${largeSessions.length} anormais${credsWarning ? ', registered=false' : ''}`);
+        log(`📋 Saúde sessão: ${totalSessions} sessões, ${largeSessions.length} anormais`);
     } catch (error) {
         log('⚠️ Erro ao verificar saúde da sessão:', error.message);
     }

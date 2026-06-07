@@ -26,6 +26,13 @@ const log = (...msg) => {
     console.log(`[${new Date().toLocaleTimeString()}]`, ...msg);
 };
 
+const logToFileOnly = (...msg) => {
+    const line = `[${new Date().toISOString()}] ${msg.join(' ')}\n`;
+    try {
+        fs.appendFileSync(LOG_FILE, line);
+    } catch (error) {}
+};
+
 // === LEITURA/ESCRITA JSON ===
 const readJson = (file) => {
     try {
@@ -131,5 +138,6 @@ module.exports = {
     isConnectionError,
     trackGroupFailure,
     trackGroupSuccess,
-    shuffleArray
+    shuffleArray,
+    logToFileOnly
 };
