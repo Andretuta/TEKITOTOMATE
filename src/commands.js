@@ -197,7 +197,7 @@ async function processCommand(sock, msg, senderNumber, isConnected, telegramBot)
 
         // === COMANDO X (TWITTER + BROADCAST) ===
         if (comando.startsWith('/x')) {
-            const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+            const { downloadMediaMessage } = require('./baileys-loader').getBaileys();
             const { addToQueue, isQueueProcessing } = require('./queue');
 
             let textToPost = messageText.slice(2).trim();

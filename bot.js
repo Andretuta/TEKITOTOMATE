@@ -11,14 +11,8 @@ const qrcode = require('qrcode');
 const axios = require('axios');
 const TelegramBot = require('node-telegram-bot-api');
 
-// Baileys
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason,
-    makeCacheableSignalKeyStore,
-    Browsers
-} = require('@whiskeysockets/baileys');
+// Baileys v7 (ESM) - carregado via import() dinâmico
+const { loadBaileys, getBaileys } = require('./src/baileys-loader');
 
 // === MÓDULOS INTERNOS ===
 const { LOG_FILE, SESSION_PATH, WHATSAPP_GROUPS_DB, TELEGRAM_CHATS_DB, MEDIA_CACHE_DIR, MAX_RECONNECT_DELAY, MAX_RECONNECT_ATTEMPTS, getSpeedConfig } = require('./src/config');
@@ -36,8 +30,47 @@ if (!fs.existsSync(SESSION_PATH)) {
     fs.mkdirSync(SESSION_PATH, { recursive: true });
 }
 
-// Logger silencioso para Baileys
+// Logger silencioso para Baileys (filtra erros de sessão repetitivos)
 const logger = pino({ level: 'silent' });
+
+// === CONTROLE DE ERROS DE SESSÃO ===
+let sessionErrorCount = 0;
+let sessionErrorLastLog = 0;
+const SESSION_ERROR_LOG_INTERVAL = 60000; // Log resumido a cada 60s
+
+// Interceptar console.log/error para filtrar erros de sessão repetitivos
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+
+function isSessionError(args) {
+    const str = args.map(a => typeof a === 'string' ? a : (a?.message || '')).join(' ');
+    return str.includes('Bad MAC') ||
+           str.includes('MessageCounterError') ||
+           str.includes('Failed to decrypt message with any known session') ||
+           str.includes('Session error:');
+}
+
+console.log = function(...args) {
+    if (isSessionError(args)) {
+        sessionErrorCount++;
+        const now = Date.now();
+        if (now - sessionErrorLastLog > SESSION_ERROR_LOG_INTERVAL && sessionErrorCount > 0) {
+            originalConsoleLog(`⚠️ [Sessão] ${sessionErrorCount} erros de descriptografia suprimidos (sessão dessincronizada)`);
+            sessionErrorLastLog = now;
+            sessionErrorCount = 0;
+        }
+        return;
+    }
+    originalConsoleLog.apply(console, args);
+};
+
+console.error = function(...args) {
+    if (isSessionError(args)) {
+        sessionErrorCount++;
+        return;
+    }
+    originalConsoleError.apply(console, args);
+};
 
 // === VARIÁVEIS GLOBAIS ===
 let sock = null;
@@ -101,6 +134,10 @@ if (TELEGRAM_TOKEN) {
 // === CONEXÃO WHATSAPP COM BAILEYS ===
 async function startWhatsApp() {
     try {
+        // Carregar Baileys v7 (ESM)
+        const baileys = await loadBaileys();
+        const { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = baileys;
+
         const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
 
         // Buscar versão mais recente do WhatsApp Web
@@ -117,20 +154,19 @@ async function startWhatsApp() {
             log(`⚠️ Falha ao buscar versão do GitHub, usando fallback: ${version.join('.')}`);
         }
 
-        log('🚀 Iniciando WhatsApp com Baileys v7...');
+        log('🚀 Iniciando WhatsApp com Baileys v7.0.0-rc13...');
         console.log(`🚀 Iniciando WhatsApp com Baileys v7 (WA Web v${version.join('.')})`);
 
         sock = makeWASocket({
             version,
             logger,
-            auth: {
-                creds: state.creds,
-                keys: makeCacheableSignalKeyStore(state.keys, logger),
-            },
+            // v7: auth state simplificado (sem makeCacheableSignalKeyStore)
+            auth: state,
             browser: Browsers.macOS('Chrome'),
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
             markOnlineOnConnect: false,
+            getMessage: async () => ({ conversation: '' }), // Evita crash em retry de mensagens não encontradas
         });
 
         // Inicializar referências nos módulos (primeira vez)
@@ -174,6 +210,11 @@ async function startWhatsApp() {
                 console.log(`⚡ Modo de velocidade: ${startProfile.label} (${startProfile.description})`);
                 console.log(`⚠️ Rate Limit: NÃO trava - apenas avisa e continua`);
                 console.log(`💡 Comandos: 'rapido', 'meio' ou 'lento' para trocar modo`);
+
+                // Verificar saúde da sessão (com delay para evitar falso positivo logo após gerar o arquivo)
+                setTimeout(() => {
+                    checkSessionHealth();
+                }, 15000);
 
                 // Sincronizar grupos
                 console.log('🔄 Sincronizando grupos existentes...');
@@ -242,11 +283,18 @@ async function startWhatsApp() {
                     const senderNumber = isLid
                         ? chatId.replace('@lid', '')
                         : chatId.replace('@s.whatsapp.net', '');
+                    
+                    // v7: Tentar obter o número via remoteJidAlt (LID<->PN mapping)
+                    const altJid = msg.key.remoteJidAlt || '';
+                    const altNumber = altJid.replace('@s.whatsapp.net', '').replace('@lid', '');
+                    
                     const admins = getAdmins();
 
-                    const isAdmin = admins.includes(senderNumber);
+                    // Verificar admin por número OU LID OU JID alternativo
+                    const isAdmin = admins.includes(senderNumber) || 
+                                   (altNumber && admins.includes(altNumber));
                     if (!isAdmin) {
-                        log(`⛔ Comando não autorizado de: ${senderNumber} (formato: ${isLid ? 'LID' : 'número'}, chatId: ${chatId})`);
+                        log(`⛔ Comando não autorizado de: ${senderNumber} (formato: ${isLid ? 'LID' : 'número'}, chatId: ${chatId}, alt: ${altJid || 'N/A'})`);
                         continue;
                     }
 
@@ -276,7 +324,7 @@ async function startWhatsApp() {
                         log('📥 Processando mídia enviada...');
                         await sock.sendMessage(chatId, { text: '📥 Baixando mídia, aguarde...' });
 
-                        const { downloadMediaMessage } = require('@whiskeysockets/baileys');
+                        const { downloadMediaMessage } = getBaileys();
                         const buffer = await downloadMediaMessage(msg, 'buffer', {});
 
                         if (buffer) {
@@ -412,15 +460,79 @@ process.on('uncaughtException', (error) => {
 
 process.on('unhandledRejection', (reason) => {
     log('❌ Promise rejeitada:', reason);
+    // Suprimir erros de sessão Signal em promises rejeitadas
+    const reasonStr = String(reason?.message || reason || '');
+    if (reasonStr.includes('Bad MAC') || reasonStr.includes('MessageCounterError') || reasonStr.includes('Failed to decrypt')) {
+        sessionErrorCount++;
+        return;
+    }
     console.error('❌ Promise rejeitada:', reason);
 });
 
-// === INICIALIZAR BOT ===
-console.log('🤖 Iniciando Bot de Broadcast (Baileys)...');
-console.log('📝 Logs salvos em:', LOG_FILE);
-console.log('📦 Usando biblioteca: @whiskeysockets/baileys (oficial)');
-console.log('⚠️ Rate Limit: NÃO trava - continua e avisa');
-console.log('-'.repeat(60));
+// === VERIFICAÇÃO DE SAÚDE DA SESSÃO ===
+function checkSessionHealth() {
+    try {
+        const sessionFiles = fs.readdirSync(SESSION_PATH).filter(f => f.startsWith('session-'));
+        const totalSessions = sessionFiles.length;
+        const baseSessions = sessionFiles.filter(f => f.match(/\.0\.json$/)).length;
+        const extraVersions = totalSessions - baseSessions;
 
-log('🤖 Bot iniciado com Baileys');
-startWhatsApp();
+        // Verificar sessões anormalmente grandes
+        const largeSessions = sessionFiles.filter(f => {
+            try {
+                const stat = fs.statSync(path.join(SESSION_PATH, f));
+                return stat.size > 5000; // Normal é ~900 bytes
+            } catch { return false; }
+        });
+
+        // Verificar se creds.json indica problemas
+        const credsPath = path.join(SESSION_PATH, 'creds.json');
+        let credsWarning = '';
+        if (fs.existsSync(credsPath)) {
+            const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
+            if (creds.registered === false) {
+                credsWarning = '\n   🔴 ALERTA: registered=false — sessão pode estar inválida!';
+            }
+        }
+
+        console.log(`📋 Saúde da sessão:`);
+        console.log(`   📁 ${totalSessions} sessões (${baseSessions} contatos, ${extraVersions} versões extras)`);
+        if (largeSessions.length > 0) {
+            console.log(`   ⚠️ ${largeSessions.length} sessão(ões) com tamanho anormal (possível corrupção)`);
+        }
+        if (credsWarning) {
+            console.log(credsWarning);
+            console.log('   💡 Solução: Apague a pasta session_baileys e escaneie o QR novamente');
+        }
+
+        log(`📋 Saúde sessão: ${totalSessions} sessões, ${largeSessions.length} anormais${credsWarning ? ', registered=false' : ''}`);
+    } catch (error) {
+        log('⚠️ Erro ao verificar saúde da sessão:', error.message);
+    }
+}
+
+// === INICIALIZAR BOT ===
+async function bootstrap() {
+    console.log('🤖 Iniciando Bot de Broadcast (Baileys v7)...');
+    console.log('📝 Logs salvos em:', LOG_FILE);
+    console.log('📦 Usando biblioteca: baileys v7.0.0-rc13 (ESM)');
+    console.log('⚠️ Rate Limit: NÃO trava - continua e avisa');
+    console.log('-'.repeat(60));
+
+    // Pré-carregar Baileys v7 (ESM)
+    try {
+        console.log('📦 Carregando Baileys v7 (ESM)...');
+        await loadBaileys();
+        console.log('✅ Baileys v7 carregado com sucesso');
+    } catch (error) {
+        console.error('❌ FATAL: Falha ao carregar Baileys v7:', error.message);
+        console.error('💡 Verifique se executou: npm install');
+        console.error('💡 Verifique se Node.js >= 20.0.0: node --version');
+        process.exit(1);
+    }
+
+    log('🤖 Bot iniciado com Baileys v7');
+    startWhatsApp();
+}
+
+bootstrap();

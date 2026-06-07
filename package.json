@@ -26,10 +26,10 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "qrcode": "^1.5.4",
     "sharp": "^0.34.5",
-    "@whiskeysockets/baileys": "^6.7.23"
+    "baileys": "^7.0.0-rc13"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "keywords": []
 }

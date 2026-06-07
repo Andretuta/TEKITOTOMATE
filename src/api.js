@@ -56,7 +56,7 @@ function createApi(getSock, getIsConnected, getTelegramBot) {
                 connected: getIsConnected(),
                 groups: wppGroups.length,
                 user: getSock()?.user || null,
-                library: 'Baileys (@whiskeysockets/baileys)'
+                library: 'Baileys v7 (baileys)'
             },
             telegram: {
                 active: !!getTelegramBot(),
