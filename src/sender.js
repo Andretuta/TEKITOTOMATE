@@ -68,7 +68,8 @@ const sentMessageStore = new Map();
 
 function saveMessageToStore(sentMsg) {
     if (!sentMsg || !sentMsg.key || !sentMsg.key.id || !sentMsg.message) return;
-    sentMessageStore.set(sentMsg.key.id, sentMsg.message);
+    // Salvar o WebMessageInfo completo
+    sentMessageStore.set(sentMsg.key.id, sentMsg);
     
     // Manter no máximo as últimas 2000 mensagens na memória
     if (sentMessageStore.size > 2000) {

@@ -52,10 +52,14 @@ const writeJson = (file, data) => {
 };
 
 // === ADMINS ===
+function normalizeAdmin(a) {
+    return String(a).replace(/@s\.whatsapp\.net|@lid/g, '').split(':')[0];
+}
+
 const getAdmins = () => {
     try {
         const data = JSON.parse(fs.readFileSync(ADMINS_FILE, 'utf8'));
-        return Array.isArray(data.admins) ? data.admins.map(String) : [];
+        return Array.isArray(data.admins) ? data.admins.map(normalizeAdmin) : [];
     } catch {
         log('⚠️ Arquivo de admins não encontrado ou inválido');
         return [];

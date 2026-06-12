@@ -178,8 +178,8 @@ async function startWhatsApp() {
             syncFullHistory: false,
             markOnlineOnConnect: false,
             getMessage: async (key) => {
-                const msg = getMessageFromStore(key);
-                if (msg) return msg;
+                const fullMsg = getMessageFromStore(key);
+                if (fullMsg && fullMsg.message) return fullMsg.message;
                 return undefined; // Retornar undefined diz ao Baileys que não temos a mensagem, evitando a bolha vazia falsa
             },
         });
@@ -294,29 +294,29 @@ async function startWhatsApp() {
                     const isGroup = chatId.endsWith('@g.us');
                     if (isGroup) continue;
 
-                    const isLid = chatId.endsWith('@lid');
+                    // Extrair remetente real e alternativo
+                    const participantJid = msg.key.participant || msg.participant || msg.key.remoteJidAlt || '';
                     const altJid = msg.key.remoteJidAlt || '';
 
-                    // Extrair número/ID principal
-                    const senderNumber = isLid
-                        ? chatId.replace('@lid', '')
-                        : chatId.replace('@s.whatsapp.net', '');
-                    
-                    // Extrair número/ID alternativo (LID <-> PN mapping v7)
-                    const altNumber = altJid.replace('@s.whatsapp.net', '').replace('@lid', '');
+                    // Normalizar para o ID base
+                    const participantId = participantJid ? participantJid.replace(/@s\.whatsapp\.net|@lid|@g\.us/g, '').split(':')[0] : null;
+                    const altId = altJid ? altJid.replace(/@s\.whatsapp\.net|@lid|@g\.us/g, '').split(':')[0] : null;
+                    const chatIdBase = chatId.replace(/@s\.whatsapp\.net|@lid|@g\.us/g, '').split(':')[0];
                     
                     const admins = getAdmins();
 
-                    // Verificar admin flexível (LID/PN completo ou só número)
-                    const isAdmin = admins.includes(chatId) || 
-                                   admins.includes(senderNumber) ||
-                                   (altJid && admins.includes(altJid)) ||
-                                   (altNumber && admins.includes(altNumber));
+                    // Verificar admin flexível
+                    const isAdmin = (participantId && admins.includes(participantId)) || 
+                                   (altId && admins.includes(altId)) ||
+                                   admins.includes(chatIdBase) ||
+                                   admins.includes(chatId); // backup completo
 
                     if (!isAdmin) {
-                        log(`⛔ Comando não autorizado de: ${chatId} (alt: ${altJid || 'N/A'})`);
+                        log(`⛔ Comando não autorizado de: participant=${participantJid} group=${chatId} alt=${altJid}`);
                         continue;
                     }
+
+                    const senderNumber = participantId || chatIdBase;
 
                     // Processar comandos
                     const isCommand = await processCommand(sock, msg, senderNumber, isConnected, telegramBot);
