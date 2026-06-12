@@ -19,7 +19,7 @@ const util = require('util');
 // === MÓDULOS INTERNOS ===
 const { LOG_FILE, SESSION_PATH, WHATSAPP_GROUPS_DB, TELEGRAM_CHATS_DB, MEDIA_CACHE_DIR, MAX_RECONNECT_DELAY, MAX_RECONNECT_ATTEMPTS, getSpeedConfig } = require('./src/config');
 const { log, readJson, writeJson, getAdmins, logToFileOnly } = require('./src/utils');
-const { initSender, updateSenderSocket, syncGroups, sendToAll } = require('./src/sender');
+const { initSender, updateSenderSocket, syncGroups, sendToAll, getMessageFromStore } = require('./src/sender');
 const { initQueue, updateQueueSocket, addToQueue, isQueueProcessing } = require('./src/queue');
 const { processCommand } = require('./src/commands');
 const { createApi } = require('./src/api');
@@ -177,7 +177,11 @@ async function startWhatsApp() {
             generateHighQualityLinkPreview: false,
             syncFullHistory: false,
             markOnlineOnConnect: false,
-            getMessage: async () => ({ conversation: '' }), // Evita crash em retry de mensagens não encontradas
+            getMessage: async (key) => {
+                const msg = getMessageFromStore(key);
+                if (msg) return msg;
+                return undefined; // Retornar undefined diz ao Baileys que não temos a mensagem, evitando a bolha vazia falsa
+            },
         });
 
         // Inicializar referências nos módulos (primeira vez)
@@ -291,21 +295,26 @@ async function startWhatsApp() {
                     if (isGroup) continue;
 
                     const isLid = chatId.endsWith('@lid');
+                    const altJid = msg.key.remoteJidAlt || '';
+
+                    // Extrair número/ID principal
                     const senderNumber = isLid
                         ? chatId.replace('@lid', '')
                         : chatId.replace('@s.whatsapp.net', '');
                     
-                    // v7: Tentar obter o número via remoteJidAlt (LID<->PN mapping)
-                    const altJid = msg.key.remoteJidAlt || '';
+                    // Extrair número/ID alternativo (LID <-> PN mapping v7)
                     const altNumber = altJid.replace('@s.whatsapp.net', '').replace('@lid', '');
                     
                     const admins = getAdmins();
 
-                    // Verificar admin por número OU LID OU JID alternativo
-                    const isAdmin = admins.includes(senderNumber) || 
+                    // Verificar admin flexível (LID/PN completo ou só número)
+                    const isAdmin = admins.includes(chatId) || 
+                                   admins.includes(senderNumber) ||
+                                   (altJid && admins.includes(altJid)) ||
                                    (altNumber && admins.includes(altNumber));
+
                     if (!isAdmin) {
-                        log(`⛔ Comando não autorizado de: ${senderNumber} (formato: ${isLid ? 'LID' : 'número'}, chatId: ${chatId}, alt: ${altJid || 'N/A'})`);
+                        log(`⛔ Comando não autorizado de: ${chatId} (alt: ${altJid || 'N/A'})`);
                         continue;
                     }
 

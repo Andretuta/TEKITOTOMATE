@@ -254,6 +254,7 @@ async function processCommand(sock, msg, senderNumber, isConnected, telegramBot)
             }
 
             // Usar a fila para enviar (evita envios paralelos e rate limit explosivo)
+            const altJid = msg.key.remoteJidAlt || '';
             const queueInfo = addToQueue({
                 content: textToPost || '',
                 imageUrl: null,
@@ -262,6 +263,7 @@ async function processCommand(sock, msg, senderNumber, isConnected, telegramBot)
                 mimetype: mimetype,
                 chatId,
                 senderNumber,
+                altJid,
                 useTwitter: true
             });
 

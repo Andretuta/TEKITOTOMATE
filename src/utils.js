@@ -55,7 +55,7 @@ const writeJson = (file, data) => {
 const getAdmins = () => {
     try {
         const data = JSON.parse(fs.readFileSync(ADMINS_FILE, 'utf8'));
-        return Array.isArray(data.admins) ? data.admins : [];
+        return Array.isArray(data.admins) ? data.admins.map(String) : [];
     } catch {
         log('⚠️ Arquivo de admins não encontrado ou inválido');
         return [];
